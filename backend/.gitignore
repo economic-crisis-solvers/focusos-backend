@@ -1,0 +1,10 @@
+.env
+target/
+*.class
+*.jar
+*.war
+.idea/
+*.iml
+.DS_Store
+model.onnx
+*.log
