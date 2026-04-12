@@ -57,7 +57,7 @@ public class EventController {
         // 1. Rate limit
         Instant oneHourAgo = Instant.now().minusSeconds(3600);
         long recentCount = focusEventRepo.countByUserIdAndTimestampAfter(userId, oneHourAgo);
-        if (recentCount >= 120) {
+        if (recentCount >= 10000) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Rate limit: 120 events/hour");
         }
 
