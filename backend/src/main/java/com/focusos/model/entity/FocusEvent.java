@@ -1,9 +1,9 @@
 package com.focusos.model.entity;
 
 import jakarta.persistence.*;
-import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -32,9 +32,18 @@ public class FocusEvent {
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> signals;
 
-    @CreationTimestamp
+    // Removed @CreationTimestamp — now we set this manually
+    // so the seed script can backdate events properly
     @Column(updatable = false)
     private Instant timestamp;
+
+    @PrePersist
+    public void prePersist() {
+        // Only set timestamp if not already provided
+        if (this.timestamp == null) {
+            this.timestamp = Instant.now();
+        }
+    }
 
     public UUID getId() { return id; }
     public void setId(UUID id) { this.id = id; }
