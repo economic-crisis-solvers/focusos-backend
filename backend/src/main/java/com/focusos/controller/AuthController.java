@@ -13,6 +13,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.UUID;
+
 @RestController
 @RequestMapping("/auth")
 public class AuthController {
@@ -30,6 +32,12 @@ public class AuthController {
         this.jwtUtil         = jwtUtil;
     }
 
+    /**
+     * Legacy register endpoint — kept for backwards compatibility.
+     * New clients should use Supabase Auth directly (signUp / signInWithOAuth).
+     * The Supabase Auth user UUID will be used as userId automatically
+     * since JwtUtil now verifies Supabase tokens.
+     */
     @PostMapping("/register")
     public ResponseEntity<AuthDtos.AuthResponse> register(@Valid @RequestBody AuthDtos.RegisterRequest body) {
         if (userRepo.existsByEmail(body.getEmail())) {
@@ -45,11 +53,15 @@ public class AuthController {
         settings.setUserId(user.getId());
         settingsRepo.save(settings);
 
-        String token = jwtUtil.generateToken(user.getId().toString());
+        // Return user ID — client should get token from Supabase Auth
         return ResponseEntity.status(HttpStatus.CREATED)
-            .body(new AuthDtos.AuthResponse(user.getId().toString(), token));
+            .body(new AuthDtos.AuthResponse(user.getId().toString(), "use-supabase-auth-token"));
     }
 
+    /**
+     * Legacy login endpoint — kept for backwards compatibility.
+     * New clients should use Supabase Auth: supabase.auth.signInWithPassword()
+     */
     @PostMapping("/login")
     public AuthDtos.AuthResponse login(@Valid @RequestBody AuthDtos.LoginRequest body) {
         User user = userRepo.findByEmail(body.getEmail())
@@ -57,7 +69,28 @@ public class AuthController {
         if (!passwordEncoder.matches(body.getPassword(), user.getPasswordHash())) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
         }
-        String token = jwtUtil.generateToken(user.getId().toString());
-        return new AuthDtos.AuthResponse(user.getId().toString(), token);
+        return new AuthDtos.AuthResponse(user.getId().toString(), "use-supabase-auth-token");
+    }
+
+    /**
+     * Auto-provision user settings for Supabase Auth users.
+     * Called after Supabase Auth login to ensure user has settings row.
+     * The userId here is the Supabase Auth UUID from the JWT sub claim.
+     */
+    @PostMapping("/provision")
+    public ResponseEntity<Void> provision(@RequestHeader("Authorization") String authHeader) {
+        // Extract userId from Supabase JWT
+        String token = authHeader.replace("Bearer ", "");
+        String userId = jwtUtil.extractUserId(token);
+
+        // Create settings row if it doesn't exist
+        UUID userUUID = UUID.fromString(userId);
+        if (settingsRepo.findByUserId(userUUID).isEmpty()) {
+            UserSettings settings = new UserSettings();
+            settings.setUserId(userUUID);
+            settingsRepo.save(settings);
+        }
+
+        return ResponseEntity.ok().build();
     }
 }

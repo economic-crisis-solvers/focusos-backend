@@ -6,35 +6,28 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
-import java.util.Date;
+import java.util.Base64;
 
 @Component
 public class JwtUtil {
 
-    private final SecretKey key;
-    private final long expirationMs;
+    private final SecretKey supabaseKey;
 
     public JwtUtil(
-        @Value("${jwt.secret}") String secret,
-        @Value("${jwt.expiration-hours:24}") long expirationHours
+        @Value("${supabase.jwt-secret}") String supabaseJwtSecret
     ) {
-        this.key          = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
-        this.expirationMs = expirationHours * 3600 * 1000;
+        // Supabase JWT secret is Base64 encoded — decode it first
+        byte[] keyBytes = Base64.getDecoder().decode(supabaseJwtSecret);
+        this.supabaseKey = Keys.hmacShaKeyFor(keyBytes);
     }
 
-    public String generateToken(String userId) {
-        return Jwts.builder()
-            .subject(userId)
-            .issuedAt(new Date())
-            .expiration(new Date(System.currentTimeMillis() + expirationMs))
-            .signWith(key)
-            .compact();
-    }
-
+    /**
+     * Extract user ID (sub claim) from a Supabase JWT token.
+     * Supabase tokens use HS256 and the sub claim is the user's UUID.
+     */
     public String extractUserId(String token) {
         return Jwts.parser()
-            .verifyWith(key)
+            .verifyWith(supabaseKey)
             .build()
             .parseSignedClaims(token)
             .getPayload()
@@ -48,5 +41,11 @@ public class JwtUtil {
         } catch (JwtException | IllegalArgumentException e) {
             return false;
         }
+    }
+
+    // Keep this for backwards compatibility during transition
+    // Remove after all clients switch to Supabase Auth
+    public String generateToken(String userId) {
+        return "deprecated-use-supabase-auth";
     }
 }
