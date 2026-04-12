@@ -6,56 +6,91 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
+import java.util.Map;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Component
 public class JwtUtil {
 
     private final SecretKey customKey;
-    private final SecretKey supabaseKeyBase64;
-    private final SecretKey supabaseKeyRaw;
+    private final String supabaseUrl;
+    private PublicKey supabasePublicKey;
+    private final ObjectMapper mapper = new ObjectMapper();
 
     public JwtUtil(
         @Value("${jwt.secret}") String jwtSecret,
-        @Value("${supabase.jwt-secret}") String supabaseJwtSecret
+        @Value("${supabase.url}") String supabaseUrl
     ) {
-        this.customKey = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+        this.customKey  = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+        this.supabaseUrl = supabaseUrl;
+        loadSupabasePublicKey();
+    }
 
-        // Try base64 decoded
-        SecretKey base64Key = null;
+    private void loadSupabasePublicKey() {
         try {
-            byte[] keyBytes = Base64.getDecoder().decode(supabaseJwtSecret);
-            base64Key = Keys.hmacShaKeyFor(keyBytes);
-        } catch (Exception e) {
-            // ignore
-        }
-        this.supabaseKeyBase64 = base64Key;
+            // Fetch JWKS from Supabase
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(supabaseUrl + "/auth/v1/.well-known/jwks.json"))
+                .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        // Also try raw bytes
-        this.supabaseKeyRaw = Keys.hmacShaKeyFor(
-            supabaseJwtSecret.getBytes(StandardCharsets.UTF_8)
-        );
+            // Parse JWKS
+            Map<?, ?> jwks = mapper.readValue(response.body(), Map.class);
+            var keys = (java.util.List<?>) jwks.get("keys");
+            if (keys != null && !keys.isEmpty()) {
+                Map<?, ?> key = (Map<?, ?>) keys.get(0);
+                String x5c = null;
+
+                // Try x5c certificate first
+                var x5cList = (java.util.List<?>) key.get("x5c");
+                if (x5cList != null && !x5cList.isEmpty()) {
+                    x5c = (String) x5cList.get(0);
+                    byte[] certBytes = Base64.getDecoder().decode(x5c);
+                    java.security.cert.CertificateFactory cf =
+                        java.security.cert.CertificateFactory.getInstance("X.509");
+                    java.security.cert.Certificate cert =
+                        cf.generateCertificate(new java.io.ByteArrayInputStream(certBytes));
+                    supabasePublicKey = cert.getPublicKey();
+                    System.out.println("[JWT] Supabase public key loaded from JWKS (x5c)");
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[JWT] Could not load Supabase public key: " + e.getMessage());
+            System.err.println("[JWT] Will fall back to custom JWT only");
+        }
     }
 
     public String extractUserId(String token) {
-        // Try Supabase base64 key
-        if (supabaseKeyBase64 != null) {
+        // Try Supabase ES256 public key first
+        if (supabasePublicKey != null) {
             try {
-                return Jwts.parser().verifyWith(supabaseKeyBase64).build()
-                    .parseSignedClaims(token).getPayload().getSubject();
+                return Jwts.parser()
+                    .verifyWith(supabasePublicKey)
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload()
+                    .getSubject();
             } catch (JwtException ignored) {}
         }
 
-        // Try Supabase raw key
-        try {
-            return Jwts.parser().verifyWith(supabaseKeyRaw).build()
-                .parseSignedClaims(token).getPayload().getSubject();
-        } catch (JwtException ignored) {}
-
-        // Fall back to custom JWT
-        return Jwts.parser().verifyWith(customKey).build()
-            .parseSignedClaims(token).getPayload().getSubject();
+        // Fall back to custom HMAC JWT
+        return Jwts.parser()
+            .verifyWith(customKey)
+            .build()
+            .parseSignedClaims(token)
+            .getPayload()
+            .getSubject();
     }
 
     public boolean isValid(String token) {
