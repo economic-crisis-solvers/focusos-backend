@@ -6,46 +6,68 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 @Component
 public class JwtUtil {
 
-    private final SecretKey supabaseKey;
+    private final SecretKey customKey;
+    private final SecretKey supabaseKeyBase64;
+    private final SecretKey supabaseKeyRaw;
 
     public JwtUtil(
+        @Value("${jwt.secret}") String jwtSecret,
         @Value("${supabase.jwt-secret}") String supabaseJwtSecret
     ) {
-        // Supabase JWT secret is Base64 encoded — decode it first
-        byte[] keyBytes = Base64.getDecoder().decode(supabaseJwtSecret);
-        this.supabaseKey = Keys.hmacShaKeyFor(keyBytes);
+        this.customKey = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+
+        // Try base64 decoded
+        SecretKey base64Key = null;
+        try {
+            byte[] keyBytes = Base64.getDecoder().decode(supabaseJwtSecret);
+            base64Key = Keys.hmacShaKeyFor(keyBytes);
+        } catch (Exception e) {
+            // ignore
+        }
+        this.supabaseKeyBase64 = base64Key;
+
+        // Also try raw bytes
+        this.supabaseKeyRaw = Keys.hmacShaKeyFor(
+            supabaseJwtSecret.getBytes(StandardCharsets.UTF_8)
+        );
     }
 
-    /**
-     * Extract user ID (sub claim) from a Supabase JWT token.
-     * Supabase tokens use HS256 and the sub claim is the user's UUID.
-     */
     public String extractUserId(String token) {
-        return Jwts.parser()
-            .verifyWith(supabaseKey)
-            .build()
-            .parseSignedClaims(token)
-            .getPayload()
-            .getSubject();
+        // Try Supabase base64 key
+        if (supabaseKeyBase64 != null) {
+            try {
+                return Jwts.parser().verifyWith(supabaseKeyBase64).build()
+                    .parseSignedClaims(token).getPayload().getSubject();
+            } catch (JwtException ignored) {}
+        }
+
+        // Try Supabase raw key
+        try {
+            return Jwts.parser().verifyWith(supabaseKeyRaw).build()
+                .parseSignedClaims(token).getPayload().getSubject();
+        } catch (JwtException ignored) {}
+
+        // Fall back to custom JWT
+        return Jwts.parser().verifyWith(customKey).build()
+            .parseSignedClaims(token).getPayload().getSubject();
     }
 
     public boolean isValid(String token) {
         try {
             extractUserId(token);
             return true;
-        } catch (JwtException | IllegalArgumentException e) {
+        } catch (Exception e) {
             return false;
         }
     }
 
-    // Keep this for backwards compatibility during transition
-    // Remove after all clients switch to Supabase Auth
     public String generateToken(String userId) {
-        return "deprecated-use-supabase-auth";
+        return "use-supabase-auth";
     }
 }

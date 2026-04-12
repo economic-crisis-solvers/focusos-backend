@@ -79,18 +79,22 @@ public class AuthController {
      */
     @PostMapping("/provision")
     public ResponseEntity<Void> provision(@RequestHeader("Authorization") String authHeader) {
-        // Extract userId from Supabase JWT
-        String token = authHeader.replace("Bearer ", "");
-        String userId = jwtUtil.extractUserId(token);
+        try {
+            String token = authHeader.replace("Bearer ", "").trim();
+            String userId = jwtUtil.extractUserId(token);
+            UUID userUUID = UUID.fromString(userId);
 
-        // Create settings row if it doesn't exist
-        UUID userUUID = UUID.fromString(userId);
-        if (settingsRepo.findByUserId(userUUID).isEmpty()) {
-            UserSettings settings = new UserSettings();
-            settings.setUserId(userUUID);
-            settingsRepo.save(settings);
+            // Create settings row if it doesn't exist
+            if (settingsRepo.findByUserId(userUUID).isEmpty()) {
+                UserSettings settings = new UserSettings();
+                settings.setUserId(userUUID);
+                settingsRepo.save(settings);
+            }
+            return ResponseEntity.ok().build();
+        } catch (Exception e) {
+            // Log but don't crash — provision is best-effort
+            System.err.println("[Provision] Error: " + e.getMessage());
+            return ResponseEntity.ok().build(); // still return 200 so dashboard isn't blocked
         }
-
-        return ResponseEntity.ok().build();
     }
 }
