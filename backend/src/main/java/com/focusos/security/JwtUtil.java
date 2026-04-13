@@ -6,17 +6,15 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
-import java.io.IOException;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
-import java.security.PublicKey;
-import java.security.spec.X509EncodedKeySpec;
-import java.util.Base64;
-import java.util.Map;
+import java.security.*;
+import java.security.spec.*;
+import java.util.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Component
@@ -24,50 +22,72 @@ public class JwtUtil {
 
     private final SecretKey customKey;
     private final String supabaseUrl;
-    private PublicKey supabasePublicKey;
+    private PublicKey supabasePublicKey = null;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public JwtUtil(
         @Value("${jwt.secret}") String jwtSecret,
         @Value("${supabase.url}") String supabaseUrl
     ) {
-        this.customKey  = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+        this.customKey   = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
         this.supabaseUrl = supabaseUrl;
         loadSupabasePublicKey();
     }
 
+    @SuppressWarnings("unchecked")
     private void loadSupabasePublicKey() {
         try {
-            // Fetch JWKS from Supabase
+            String jwksUrl = supabaseUrl + "/auth/v1/.well-known/jwks.json";
+            System.out.println("[JWT] Fetching JWKS from: " + jwksUrl);
+
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(supabaseUrl + "/auth/v1/.well-known/jwks.json"))
+                .uri(URI.create(jwksUrl))
                 .build();
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            System.out.println("[JWT] JWKS response: " + response.body());
 
-            // Parse JWKS
-            Map<?, ?> jwks = mapper.readValue(response.body(), Map.class);
-            var keys = (java.util.List<?>) jwks.get("keys");
-            if (keys != null && !keys.isEmpty()) {
-                Map<?, ?> key = (Map<?, ?>) keys.get(0);
-                String x5c = null;
+            Map<String, Object> jwks = mapper.readValue(response.body(), Map.class);
+            List<Map<String, Object>> keys = (List<Map<String, Object>>) jwks.get("keys");
 
-                // Try x5c certificate first
-                var x5cList = (java.util.List<?>) key.get("x5c");
-                if (x5cList != null && !x5cList.isEmpty()) {
-                    x5c = (String) x5cList.get(0);
-                    byte[] certBytes = Base64.getDecoder().decode(x5c);
-                    java.security.cert.CertificateFactory cf =
-                        java.security.cert.CertificateFactory.getInstance("X.509");
-                    java.security.cert.Certificate cert =
-                        cf.generateCertificate(new java.io.ByteArrayInputStream(certBytes));
-                    supabasePublicKey = cert.getPublicKey();
-                    System.out.println("[JWT] Supabase public key loaded from JWKS (x5c)");
+            if (keys == null || keys.isEmpty()) {
+                System.out.println("[JWT] JWKS returned empty keys — Supabase may still use HS256");
+                return;
+            }
+
+            for (Map<String, Object> key : keys) {
+                String kty = (String) key.get("kty");
+                String alg = (String) key.get("alg");
+                System.out.println("[JWT] Found key: kty=" + kty + " alg=" + alg);
+
+                if ("EC".equals(kty) && key.containsKey("x") && key.containsKey("y")) {
+                    // ES256 key — reconstruct from x,y coordinates
+                    byte[] xBytes = Base64.getUrlDecoder().decode((String) key.get("x"));
+                    byte[] yBytes = Base64.getUrlDecoder().decode((String) key.get("y"));
+
+                    ECPoint point = new ECPoint(
+                        new BigInteger(1, xBytes),
+                        new BigInteger(1, yBytes)
+                    );
+                    ECParameterSpec spec = ((java.security.interfaces.ECPublicKey)
+                        KeyPairGenerator.getInstance("EC").generateKeyPair().getPublic())
+                        .getParams();
+
+                    // Use P-256 curve spec
+                    AlgorithmParameters params = AlgorithmParameters.getInstance("EC");
+                    params.init(new ECGenParameterSpec("secp256r1"));
+                    ECParameterSpec ecSpec = params.getParameterSpec(ECParameterSpec.class);
+
+                    ECPublicKeySpec pubKeySpec = new ECPublicKeySpec(point, ecSpec);
+                    supabasePublicKey = KeyFactory.getInstance("EC").generatePublic(pubKeySpec);
+                    System.out.println("[JWT] ES256 public key loaded from JWKS successfully");
+                    return;
                 }
             }
+            System.out.println("[JWT] No EC key found in JWKS");
         } catch (Exception e) {
-            System.err.println("[JWT] Could not load Supabase public key: " + e.getMessage());
-            System.err.println("[JWT] Will fall back to custom JWT only");
+            System.err.println("[JWT] Failed to load JWKS: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -81,10 +101,12 @@ public class JwtUtil {
                     .parseSignedClaims(token)
                     .getPayload()
                     .getSubject();
-            } catch (JwtException ignored) {}
+            } catch (JwtException ignored) {
+                System.out.println("[JWT] ES256 verification failed, trying HS256 fallback");
+            }
         }
 
-        // Fall back to custom HMAC JWT
+        // Fall back to custom HS256 JWT
         return Jwts.parser()
             .verifyWith(customKey)
             .build()
