@@ -36,6 +36,8 @@ public class EventDtos {
     public static class EventRequest {
         private String sessionId;
         private Instant timestamp;
+        private String activeUrl;  // full URL of active tab — used for content analysis
+
         @NotNull
         private SignalPayload signals;
         private int windowCount = 6;
@@ -44,6 +46,8 @@ public class EventDtos {
         public void setSessionId(String sessionId) { this.sessionId = sessionId; }
         public Instant getTimestamp() { return timestamp; }
         public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
+        public String getActiveUrl() { return activeUrl; }
+        public void setActiveUrl(String activeUrl) { this.activeUrl = activeUrl; }
         public SignalPayload getSignals() { return signals; }
         public void setSignals(SignalPayload signals) { this.signals = signals; }
         public int getWindowCount() { return windowCount; }
