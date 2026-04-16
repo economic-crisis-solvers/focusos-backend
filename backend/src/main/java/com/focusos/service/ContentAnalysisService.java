@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  *   - YouTube: fetches video title + description via YouTube Data API
  *   - Any webpage: fetches page title + meta description from HTML
  *
- * Then classifies using Claude API: work / educational / entertainment / other
+ * Then classifies using Grok API (xAI): work / educational / entertainment / social / other
  *
  * Result overrides the generic url_category from Chrome extension.
  */
@@ -31,8 +31,8 @@ public class ContentAnalysisService {
     @Value("${youtube.api-key:}")
     private String youtubeApiKey;
 
-    @Value("${anthropic.api-key:}")
-    private String anthropicApiKey;
+    @Value("${grok.api-key:}")
+    private String grokApiKey;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(3))
@@ -105,11 +105,11 @@ public class ContentAnalysisService {
 
         if (title == null) return null;
 
-        // Truncate description to keep Claude prompt short
+        // Truncate description to keep Grok prompt short
         String shortDesc = description != null && description.length() > 300
             ? description.substring(0, 300) : description;
 
-        return classifyWithClaude(
+        return classifyWithGrok(
             "YouTube video title: " + title + "\nDescription: " + shortDesc
         );
     }
@@ -146,7 +146,7 @@ public class ContentAnalysisService {
         String content = "Page title: " + (title != null ? title : "unknown");
         if (metaDesc != null) content += "\nMeta description: " + metaDesc;
 
-        return classifyWithClaude(content);
+        return classifyWithGrok(content);
     }
 
     private boolean isAmbiguousSite(String url) {
@@ -160,11 +160,11 @@ public class ContentAnalysisService {
             || url.contains("quora.com");
     }
 
-    // ── Claude Classification ────────────────────────────────────────────
+    // ── Grok Classification ──────────────────────────────────────────────
 
-    private String classifyWithClaude(String content) throws Exception {
-        if (anthropicApiKey == null || anthropicApiKey.isEmpty()) {
-            System.out.println("[ContentAnalysis] Anthropic API key not set — skipping classification");
+    private String classifyWithGrok(String content) throws Exception {
+        if (grokApiKey == null || grokApiKey.isEmpty()) {
+            System.out.println("[ContentAnalysis] Grok API key not set — skipping classification");
             return null;
         }
 
@@ -185,32 +185,32 @@ public class ContentAnalysisService {
             Reply with one word only.
             """;
 
+        // Grok uses OpenAI-compatible API format
         String requestBody = """
             {
-                "model": "claude-haiku-4-5-20251001",
+                "model": "grok-3-mini",
                 "max_tokens": 10,
                 "messages": [{"role": "user", "content": "%s"}]
             }
             """.formatted(prompt.replace("\"", "\\\"").replace("\n", "\\n"));
 
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create("https://api.anthropic.com/v1/messages"))
+            .uri(URI.create("https://api.x.ai/v1/chat/completions"))
             .timeout(Duration.ofSeconds(5))
             .header("Content-Type", "application/json")
-            .header("x-api-key", anthropicApiKey)
-            .header("anthropic-version", "2023-06-01")
+            .header("Authorization", "Bearer " + grokApiKey)
             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
             .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
-            System.out.println("[ContentAnalysis] Claude API error: " + response.statusCode());
+            System.out.println("[ContentAnalysis] Grok API error: " + response.statusCode() + " — " + response.body());
             return null;
         }
 
         String responseBody = response.body();
-        String result = extractClaudeResponse(responseBody);
+        String result = extractGrokResponse(responseBody);
 
         if (result == null) return null;
 
@@ -256,8 +256,10 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    private String extractClaudeResponse(String json) {
-        Pattern pattern = Pattern.compile("\"text\"\\s*:\\s*\"([^\"]+)\"");
+    // Grok uses OpenAI-compatible response format:
+    // {"choices": [{"message": {"content": "educational"}}]}
+    private String extractGrokResponse(String json) {
+        Pattern pattern = Pattern.compile("\"content\"\\s*:\\s*\"([^\"]+)\"");
         Matcher matcher = pattern.matcher(json);
         return matcher.find() ? matcher.group(1) : null;
     }
