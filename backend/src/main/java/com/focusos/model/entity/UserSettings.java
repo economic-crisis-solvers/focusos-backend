@@ -28,6 +28,12 @@ public class UserSettings {
     @Column(name = "quiet_hours_end")
     private String quietHoursEnd = "07:00";
 
+    @Column(name = "work_hours_start")
+    private String workHoursStart = "09:00";
+
+    @Column(name = "work_hours_end")
+    private String workHoursEnd = "18:00";
+
     @UpdateTimestamp
     @Column(name = "updated_at")
     private Instant updatedAt;
@@ -44,5 +50,9 @@ public class UserSettings {
     public void setQuietHoursStart(String quietHoursStart) { this.quietHoursStart = quietHoursStart; }
     public String getQuietHoursEnd() { return quietHoursEnd; }
     public void setQuietHoursEnd(String quietHoursEnd) { this.quietHoursEnd = quietHoursEnd; }
+    public String getWorkHoursStart() { return workHoursStart; }
+    public void setWorkHoursStart(String workHoursStart) { this.workHoursStart = workHoursStart; }
+    public String getWorkHoursEnd() { return workHoursEnd; }
+    public void setWorkHoursEnd(String workHoursEnd) { this.workHoursEnd = workHoursEnd; }
     public Instant getUpdatedAt() { return updatedAt; }
 }

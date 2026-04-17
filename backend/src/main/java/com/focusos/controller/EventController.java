@@ -20,6 +20,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -32,7 +34,6 @@ public class EventController {
     private static final Logger log = LoggerFactory.getLogger(EventController.class);
 
     // ── Notification timing fix ───────────────────────────────────────────
-    // Track consecutive above-threshold counts per user.
     // Only release notifications after 3 consecutive focused batches (90 seconds)
     // to prevent releasing during brief score spikes.
     private final ConcurrentHashMap<String, Integer> consecutiveFocusCount = new ConcurrentHashMap<>();
@@ -53,12 +54,12 @@ public class EventController {
                            RealtimeService realtimeService,
                            ResidueService residueService,
                            ContentAnalysisService contentAnalysisService) {
-        this.focusEventRepo       = focusEventRepo;
-        this.distractionRepo      = distractionRepo;
-        this.settingsRepo         = settingsRepo;
-        this.mlService            = mlService;
-        this.realtimeService      = realtimeService;
-        this.residueService       = residueService;
+        this.focusEventRepo         = focusEventRepo;
+        this.distractionRepo        = distractionRepo;
+        this.settingsRepo           = settingsRepo;
+        this.mlService              = mlService;
+        this.realtimeService        = realtimeService;
+        this.residueService         = residueService;
         this.contentAnalysisService = contentAnalysisService;
     }
 
@@ -76,11 +77,21 @@ public class EventController {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Rate limit: 120 events/hour");
         }
 
-        // ── 2. Content analysis (async — enriches URL category) ───────────
-        // If user is on YouTube or an ambiguous site, analyze actual content
-        // This overrides the generic Chrome extension category
+        // ── 2. Fetch user settings (needed for threshold + work hours) ────
+        UserSettings settings = settingsRepo.findByUserId(userId).orElse(null);
+        int threshold = settings != null ? settings.getFocusThreshold() : 45;
+
+        // ── 3. Work hours check ───────────────────────────────────────────
+        // If work hours are set and current time is outside them,
+        // we still save the event and broadcast score, but skip DND/nudge triggers.
+        boolean withinWorkHours = isWithinWorkHours(settings);
+        if (!withinWorkHours) {
+            log.info("[Events] Outside work hours for user {} — passive mode only", userId);
+        }
+
+        // ── 4. Content analysis (async — enriches URL category) ───────────
         String enrichedCategory = null;
-        String rawUrl = body.getActiveUrl(); // new field from Chrome extension
+        String rawUrl = body.getActiveUrl();
         if (rawUrl != null && !rawUrl.isEmpty()) {
             try {
                 enrichedCategory = contentAnalysisService.analyzeUrl(rawUrl);
@@ -89,31 +100,25 @@ public class EventController {
             }
         }
 
-        // Use enriched category if available, otherwise use Chrome extension category
         EventDtos.SignalPayload signals = body.getSignals();
         if (enrichedCategory != null) {
             signals.setUrlCategory(enrichedCategory);
             log.info("[Events] URL category enriched: {} → {}", rawUrl, enrichedCategory);
         }
 
-        // ── 3. ML inference ───────────────────────────────────────────────
+        // ── 5. ML inference ───────────────────────────────────────────────
         MlService.PredictionResult prediction = mlService.predict(signals);
         int     score       = prediction.score();
         String  state       = prediction.state();
         boolean focusActive = prediction.focusActive();
 
-        // ── 4. Fetch threshold ────────────────────────────────────────────
-        int threshold = settingsRepo.findByUserId(userId)
-            .map(UserSettings::getFocusThreshold)
-            .orElse(45);
-
-        // ── 5. Previous score ─────────────────────────────────────────────
+        // ── 6. Previous score ─────────────────────────────────────────────
         Integer prevScore = focusEventRepo
             .findTopByUserIdOrderByTimestampDesc(userId)
             .map(FocusEvent::getScore)
             .orElse(null);
 
-        // ── 6. Save event ─────────────────────────────────────────────────
+        // ── 7. Save event ─────────────────────────────────────────────────
         FocusEvent event = new FocusEvent();
         event.setUserId(userId);
         event.setScore(score);
@@ -125,12 +130,10 @@ public class EventController {
         }
         focusEventRepo.save(event);
 
-        // ── 7. Threshold crossing + notification timing fix ───────────────
+        // ── 8. Threshold crossing + notification timing fix ───────────────
         boolean crossedBelow = prevScore != null && prevScore >= threshold && score < threshold;
 
-        // Notification timing fix: only trigger "focus recovered" broadcast
-        // after CONSECUTIVE_FOCUS_REQUIRED batches above threshold (not on first spike)
-        String userKey = userId.toString();
+        String  userKey       = userId.toString();
         boolean stableRecovery = false;
 
         if (score >= threshold) {
@@ -142,52 +145,85 @@ public class EventController {
                     userId, CONSECUTIVE_FOCUS_REQUIRED);
             }
         } else {
-            // Reset consecutive count when score drops
             consecutiveFocusCount.put(userKey, 0);
         }
 
-        if (crossedBelow) {
-            DistractionEvent distraction = new DistractionEvent();
-            distraction.setUserId(userId);
-            distraction.setStartedAt(Instant.now());
-            distraction.setTriggerCategory(signals.getUrlCategory());
-            distraction.setResidueMinutesAdded(ResidueService.residueForDistraction(0));
-            distractionRepo.save(distraction);
-            log.info("[Events] Focus dropped below threshold for user {}", userId);
+        // Only open/close distraction events and trigger DND during work hours
+        if (withinWorkHours) {
+            if (crossedBelow) {
+                DistractionEvent distraction = new DistractionEvent();
+                distraction.setUserId(userId);
+                distraction.setStartedAt(Instant.now());
+                distraction.setTriggerCategory(signals.getUrlCategory());
+                distraction.setResidueMinutesAdded(ResidueService.residueForDistraction(0));
+                distractionRepo.save(distraction);
+                log.info("[Events] Focus dropped below threshold for user {}", userId);
+            }
+
+            if (stableRecovery) {
+                distractionRepo.closeOpenEvents(userId, Instant.now());
+                log.info("[Events] Stable recovery confirmed — closing distraction events for user {}", userId);
+            }
         }
 
-        if (stableRecovery) {
-            distractionRepo.closeOpenEvents(userId, Instant.now());
-            log.info("[Events] Stable recovery confirmed — closing distraction events for user {}", userId);
-        }
-
-        // ── 8. Realtime broadcasts ────────────────────────────────────────
+        // ── 9. Realtime broadcasts ────────────────────────────────────────
         String nowIso = Instant.now().toString();
 
-        // Always broadcast score update
+        // Always broadcast score update regardless of work hours
         Map<String, Object> scorePayload = new HashMap<>();
         scorePayload.put("score",     score);
         scorePayload.put("state",     state);
         scorePayload.put("timestamp", nowIso);
         realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
 
-        // Only broadcast focus_active_change on threshold cross OR stable recovery
-        if (crossedBelow || stableRecovery) {
+        // Only broadcast focus_active_change (triggers DND + nudge) during work hours
+        if (withinWorkHours && (crossedBelow || stableRecovery)) {
             Map<String, Object> activePayload = new HashMap<>();
             activePayload.put("focus_active", focusActive);
             activePayload.put("score",        score);
             activePayload.put("timestamp",    nowIso);
-            // Tell mobile this is a stable recovery (release notifications quietly)
             if (stableRecovery) {
                 activePayload.put("release_mode", "quiet");
             }
             realtimeService.broadcast(userId.toString(), "focus_active_change", activePayload);
         }
 
-        // ── 9. Residue ────────────────────────────────────────────────────
+        // ── 10. Residue ───────────────────────────────────────────────────
         double residueMinutes = residueService.calculate(userId).getResidueMinutesRemaining();
 
         return new EventDtos.EventResponse(score, state, focusActive, residueMinutes);
+    }
+
+    // ── Work Hours Helper ─────────────────────────────────────────────────
+    // Returns true if current time (IST) is within user's configured work hours.
+    // If work hours not set, defaults to always active (backwards compatible).
+    private boolean isWithinWorkHours(UserSettings settings) {
+        if (settings == null) return true;
+
+        String startStr = settings.getWorkHoursStart();
+        String endStr   = settings.getWorkHoursEnd();
+
+        // If not configured, treat as always within work hours
+        if (startStr == null || startStr.isEmpty() || endStr == null || endStr.isEmpty()) {
+            return true;
+        }
+
+        try {
+            LocalTime now   = LocalTime.now(ZoneId.of("Asia/Kolkata")); // IST — change if needed
+            LocalTime start = LocalTime.parse(startStr); // e.g. "09:00"
+            LocalTime end   = LocalTime.parse(endStr);   // e.g. "18:00"
+
+            if (start.isBefore(end)) {
+                // Normal range e.g. 09:00 - 18:00
+                return !now.isBefore(start) && !now.isAfter(end);
+            } else {
+                // Overnight range e.g. 22:00 - 06:00
+                return !now.isBefore(start) || !now.isAfter(end);
+            }
+        } catch (Exception e) {
+            log.warn("[Events] Could not parse work hours — defaulting to active: {}", e.getMessage());
+            return true;
+        }
     }
 
     private Map<String, Object> signalsToMap(EventDtos.SignalPayload s) {

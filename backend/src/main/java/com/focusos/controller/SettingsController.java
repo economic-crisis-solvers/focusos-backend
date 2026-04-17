@@ -39,6 +39,10 @@ public class SettingsController {
             s.setQuietHoursStart(body.getQuietHours().getStart());
             s.setQuietHoursEnd(body.getQuietHours().getEnd());
         }
+        if (body.getWorkHours() != null) {
+            s.setWorkHoursStart(body.getWorkHours().getStart());
+            s.setWorkHoursEnd(body.getWorkHours().getEnd());
+        }
         settingsRepo.save(s);
         return toResponse(s);
     }
@@ -53,9 +57,15 @@ public class SettingsController {
 
     private SettingsDtos.SettingsResponse toResponse(UserSettings s) {
         List<String> whitelist = s.getWhitelist() != null ? Arrays.asList(s.getWhitelist()) : List.of();
+
         SettingsDtos.QuietHours qh = new SettingsDtos.QuietHours();
         qh.setStart(s.getQuietHoursStart());
         qh.setEnd(s.getQuietHoursEnd());
-        return new SettingsDtos.SettingsResponse(s.getFocusThreshold(), whitelist, qh);
+
+        SettingsDtos.WorkHours wh = new SettingsDtos.WorkHours();
+        wh.setStart(s.getWorkHoursStart() != null ? s.getWorkHoursStart() : "09:00");
+        wh.setEnd(s.getWorkHoursEnd() != null ? s.getWorkHoursEnd() : "18:00");
+
+        return new SettingsDtos.SettingsResponse(s.getFocusThreshold(), whitelist, qh, wh);
     }
 }
