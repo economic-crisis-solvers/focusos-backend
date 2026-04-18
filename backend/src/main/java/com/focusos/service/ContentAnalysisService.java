@@ -178,7 +178,7 @@ public class ContentAnalysisService {
             + "}"
             + "}";
 
-        String apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+       String apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
             + "?key=" + geminiApiKey;
 
         HttpRequest request = HttpRequest.newBuilder()
