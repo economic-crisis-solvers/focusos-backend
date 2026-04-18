@@ -8,6 +8,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,11 +20,10 @@ import java.util.regex.Pattern;
  * URL category than simple domain matching.
  *
  * Supports:
- *   - YouTube: fetches video title + description via YouTube Data API
- *   - Any webpage: fetches page title + meta description from HTML
- *
- * Then classifies using Groq API (llama-3.1-8b-instant):
- * work / educational / entertainment / social / other
+ *   - YouTube: fetches video title + description via YouTube Data API → Groq
+ *   - Reddit: classifies by subreddit name (no HTTP fetch needed)
+ *   - Twitter/X: always social (blocks scraping anyway)
+ *   - LinkedIn, Medium, Substack, Quora: fetch page meta → Groq
  *
  * Result overrides the generic url_category from Chrome extension.
  */
@@ -42,24 +43,120 @@ public class ContentAnalysisService {
     private static final Pattern YOUTUBE_VIDEO_PATTERN =
         Pattern.compile("(?:youtube\\.com/watch\\?.*v=|youtu\\.be/)([a-zA-Z0-9_-]{11})");
 
+    private static final Pattern REDDIT_SUBREDDIT_PATTERN =
+        Pattern.compile("reddit\\.com/r/([a-zA-Z0-9_]+)");
+
+    // ── Reddit subreddit category maps ────────────────────────────────────
+
+    private static final Set<String> EDUCATIONAL_SUBREDDITS = Set.of(
+        "learnprogramming", "learnjava", "learnpython", "learnjavascript",
+        "learnmath", "science", "askscience", "explainlikeimfive", "eli5",
+        "todayilearned", "til", "education", "edtech", "coursera", "udemy",
+        "computerscience", "compsci", "datascience", "machinelearning",
+        "artificialintelligence", "statistics", "physics", "chemistry",
+        "biology", "history", "philosophy", "languagelearning", "math",
+        "mathematics", "algebra", "calculus", "coding", "webdev",
+        "androiddev", "iosprogramming", "devops", "cybersecurity",
+        "netsec", "reverseengineering", "algorithms", "leetcode",
+        "cscareerquestions", "programming", "java", "python", "javascript",
+        "golang", "rust", "cpp", "csharp", "swift", "kotlin"
+    );
+
+    private static final Set<String> WORK_SUBREDDITS = Set.of(
+        "productivity", "entrepreneur", "startups", "smallbusiness",
+        "projectmanagement", "agile", "sysadmin", "aws", "azure",
+        "googlecloud", "devops", "softwareengineering", "backend",
+        "frontend", "fullstack", "dataengineering", "businessanalysis",
+        "remotework", "freelance", "careerguidance", "jobs"
+    );
+
+    private static final Set<String> ENTERTAINMENT_SUBREDDITS = Set.of(
+        "memes", "dankmemes", "funny", "gaming", "pcgaming", "games",
+        "movies", "television", "netflix", "anime", "manga", "comics",
+        "music", "videos", "gifs", "aww", "cats", "dogs", "sports",
+        "nba", "nfl", "soccer", "football", "worldnews", "news",
+        "politics", "entertainment", "celebrities", "pop", "hiphop",
+        "askreddit", "tifu", "amitheasshole", "relationship_advice",
+        "teenagers", "mildlyinteresting", "interestingasfuck",
+        "facepalm", "cringe", "roastme", "showerthoughts"
+    );
+
+    private static final Set<String> SOCIAL_SUBREDDITS = Set.of(
+        "casualconversation", "chat", "makefriends", "needafriend",
+        "socialskills", "dating", "tinder", "relationships"
+    );
+
     /**
      * Analyzes a URL and returns a refined category.
      * Returns null if analysis fails or URL isn't worth analyzing —
      * caller should fall back to Chrome extension's category.
-     *
-     * Categories returned: "work" | "educational" | "entertainment" | "social" | "other"
      */
     public String analyzeUrl(String url) {
         if (url == null || url.isEmpty()) return null;
 
         try {
+            // YouTube — use YouTube Data API
             if (url.contains("youtube.com") || url.contains("youtu.be")) {
                 return analyzeYouTubeUrl(url);
             }
+
+            // Reddit — classify by subreddit name, no scraping needed
+            if (url.contains("reddit.com")) {
+                return analyzeRedditUrl(url);
+            }
+
+            // Twitter/X — always social, blocks scraping anyway
+            if (url.contains("twitter.com") || url.contains("x.com")) {
+                System.out.println("[ContentAnalysis] Twitter/X detected → social");
+                return "social";
+            }
+
+            // LinkedIn, Medium, Substack, Quora — fetch page meta → Groq
             return analyzeGenericUrl(url);
+
         } catch (Exception e) {
             System.out.println("[ContentAnalysis] Analysis failed for " + url + ": " + e.getMessage());
             return null;
+        }
+    }
+
+    // ── Reddit Analysis ───────────────────────────────────────────────────
+
+    private String analyzeRedditUrl(String url) {
+        Matcher matcher = REDDIT_SUBREDDIT_PATTERN.matcher(url);
+        if (!matcher.find()) {
+            // No subreddit in URL (e.g. reddit.com homepage) — treat as social
+            return "social";
+        }
+
+        String subreddit = matcher.group(1).toLowerCase();
+        System.out.println("[ContentAnalysis] Reddit subreddit detected: r/" + subreddit);
+
+        if (EDUCATIONAL_SUBREDDITS.contains(subreddit)) {
+            System.out.println("[ContentAnalysis] Classified as: educational");
+            return "educational";
+        }
+        if (WORK_SUBREDDITS.contains(subreddit)) {
+            System.out.println("[ContentAnalysis] Classified as: work");
+            return "work";
+        }
+        if (ENTERTAINMENT_SUBREDDITS.contains(subreddit)) {
+            System.out.println("[ContentAnalysis] Classified as: entertainment");
+            return "entertainment";
+        }
+        if (SOCIAL_SUBREDDITS.contains(subreddit)) {
+            System.out.println("[ContentAnalysis] Classified as: social");
+            return "social";
+        }
+
+        // Unknown subreddit — fall back to Groq with just the subreddit name
+        System.out.println("[ContentAnalysis] Unknown subreddit r/" + subreddit + " — asking Groq");
+        try {
+            return classifyWithGroq("Reddit community name: r/" + subreddit
+                + ". Classify what kind of content this community likely discusses.");
+        } catch (Exception e) {
+            System.out.println("[ContentAnalysis] Groq fallback failed: " + e.getMessage());
+            return "other";
         }
     }
 
@@ -112,7 +209,7 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    // ── Generic URL Analysis ─────────────────────────────────────────────
+    // ── Generic URL Analysis (LinkedIn, Medium, Substack, Quora) ─────────
 
     private String analyzeGenericUrl(String url) throws Exception {
         if (!isAmbiguousSite(url)) return null;
@@ -140,9 +237,6 @@ public class ContentAnalysisService {
 
     private boolean isAmbiguousSite(String url) {
         return url.contains("linkedin.com")
-            || url.contains("reddit.com")
-            || url.contains("twitter.com")
-            || url.contains("x.com")
             || url.contains("medium.com")
             || url.contains("substack.com")
             || url.contains("quora.com");
@@ -168,7 +262,6 @@ public class ContentAnalysisService {
             + content.replace("\"", "\\\"").replace("\n", "\\n")
             + "\\n\\nReply with one word only.";
 
-        // Groq uses OpenAI-compatible format
         String requestBody = "{"
             + "\"model\": \"llama-3.1-8b-instant\","
             + "\"max_tokens\": 10,"
@@ -191,7 +284,6 @@ public class ContentAnalysisService {
             return null;
         }
 
-        // OpenAI-compatible response: {"choices": [{"message": {"content": "educational"}}]}
         String result = extractGroqResponse(response.body());
         if (result == null) return null;
 
