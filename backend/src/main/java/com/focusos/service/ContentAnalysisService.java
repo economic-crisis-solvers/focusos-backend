@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  *   - YouTube: fetches video title + description via YouTube Data API
  *   - Any webpage: fetches page title + meta description from HTML
  *
- * Then classifies using Google Gemini API: work / educational / entertainment / social / other
+ * Then classifies using Groq API (llama-3.1-8b-instant):
+ * work / educational / entertainment / social / other
  *
  * Result overrides the generic url_category from Chrome extension.
  */
@@ -31,8 +32,8 @@ public class ContentAnalysisService {
     @Value("${youtube.api-key:}")
     private String youtubeApiKey;
 
-    @Value("${gemini.api-key:}")
-    private String geminiApiKey;
+    @Value("${groq.api-key:}")
+    private String groqApiKey;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(3))
@@ -101,7 +102,7 @@ public class ContentAnalysisService {
         String shortDesc = description != null && description.length() > 300
             ? description.substring(0, 300) : description;
 
-        return classifyWithGemini(
+        return classifyWithGroq(
             "YouTube video title: " + title + "\nDescription: " + shortDesc
         );
     }
@@ -134,7 +135,7 @@ public class ContentAnalysisService {
         String content = "Page title: " + (title != null ? title : "unknown");
         if (metaDesc != null) content += "\nMeta description: " + metaDesc;
 
-        return classifyWithGemini(content);
+        return classifyWithGroq(content);
     }
 
     private boolean isAmbiguousSite(String url) {
@@ -147,11 +148,11 @@ public class ContentAnalysisService {
             || url.contains("quora.com");
     }
 
-    // ── Gemini Classification ────────────────────────────────────────────
+    // ── Groq Classification ──────────────────────────────────────────────
 
-    private String classifyWithGemini(String content) throws Exception {
-        if (geminiApiKey == null || geminiApiKey.isEmpty()) {
-            System.out.println("[ContentAnalysis] Gemini API key not set — skipping classification");
+    private String classifyWithGroq(String content) throws Exception {
+        if (groqApiKey == null || groqApiKey.isEmpty()) {
+            System.out.println("[ContentAnalysis] Groq API key not set — skipping classification");
             return null;
         }
 
@@ -167,35 +168,31 @@ public class ContentAnalysisService {
             + content.replace("\"", "\\\"").replace("\n", "\\n")
             + "\\n\\nReply with one word only.";
 
-        // Gemini REST API — no SDK needed, pure HTTP
+        // Groq uses OpenAI-compatible format
         String requestBody = "{"
-            + "\"contents\": [{"
-            + "\"parts\": [{\"text\": \"" + prompt + "\"}]"
-            + "}],"
-            + "\"generationConfig\": {"
-            + "\"maxOutputTokens\": 10,"
-            + "\"temperature\": 0.0"
-            + "}"
+            + "\"model\": \"llama-3.1-8b-instant\","
+            + "\"max_tokens\": 10,"
+            + "\"temperature\": 0,"
+            + "\"messages\": [{\"role\": \"user\", \"content\": \"" + prompt + "\"}]"
             + "}";
 
-       String apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-            + "?key=" + geminiApiKey;
-
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(apiUrl))
+            .uri(URI.create("https://api.groq.com/openai/v1/chat/completions"))
             .timeout(Duration.ofSeconds(5))
             .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer " + groqApiKey)
             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
             .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
-            System.out.println("[ContentAnalysis] Gemini API error: " + response.statusCode() + " — " + response.body());
+            System.out.println("[ContentAnalysis] Groq API error: " + response.statusCode() + " — " + response.body());
             return null;
         }
 
-        String result = extractGeminiResponse(response.body());
+        // OpenAI-compatible response: {"choices": [{"message": {"content": "educational"}}]}
+        String result = extractGroqResponse(response.body());
         if (result == null) return null;
 
         result = result.trim().toLowerCase();
@@ -238,10 +235,9 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    // Gemini response format:
-    // {"candidates": [{"content": {"parts": [{"text": "educational"}]}}]}
-    private String extractGeminiResponse(String json) {
-        Pattern pattern = Pattern.compile("\"text\"\\s*:\\s*\"([^\"]+)\"");
+    // OpenAI-compatible response: {"choices": [{"message": {"content": "educational"}}]}
+    private String extractGroqResponse(String json) {
+        Pattern pattern = Pattern.compile("\"content\"\\s*:\\s*\"([^\"]+)\"");
         Matcher matcher = pattern.matcher(json);
         return matcher.find() ? matcher.group(1) : null;
     }
