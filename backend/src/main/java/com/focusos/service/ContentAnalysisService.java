@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  *   - YouTube: fetches video title + description via YouTube Data API
  *   - Any webpage: fetches page title + meta description from HTML
  *
- * Then classifies using Grok API (xAI): work / educational / entertainment / social / other
+ * Then classifies using Google Gemini API: work / educational / entertainment / social / other
  *
  * Result overrides the generic url_category from Chrome extension.
  */
@@ -31,14 +31,13 @@ public class ContentAnalysisService {
     @Value("${youtube.api-key:}")
     private String youtubeApiKey;
 
-    @Value("${grok.api-key:}")
-    private String grokApiKey;
+    @Value("${gemini.api-key:}")
+    private String geminiApiKey;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(3))
         .build();
 
-    // YouTube URL patterns
     private static final Pattern YOUTUBE_VIDEO_PATTERN =
         Pattern.compile("(?:youtube\\.com/watch\\?.*v=|youtu\\.be/)([a-zA-Z0-9_-]{11})");
 
@@ -53,14 +52,10 @@ public class ContentAnalysisService {
         if (url == null || url.isEmpty()) return null;
 
         try {
-            // YouTube — use YouTube Data API for accurate video metadata
             if (url.contains("youtube.com") || url.contains("youtu.be")) {
                 return analyzeYouTubeUrl(url);
             }
-
-            // Other sites — fetch page title + meta description
             return analyzeGenericUrl(url);
-
         } catch (Exception e) {
             System.out.println("[ContentAnalysis] Analysis failed for " + url + ": " + e.getMessage());
             return null;
@@ -78,7 +73,6 @@ public class ContentAnalysisService {
         String videoId = extractYouTubeVideoId(url);
         if (videoId == null) return null;
 
-        // Fetch video metadata from YouTube Data API
         String apiUrl = "https://www.googleapis.com/youtube/v3/videos"
             + "?id=" + videoId
             + "&part=snippet"
@@ -98,18 +92,16 @@ public class ContentAnalysisService {
             return null;
         }
 
-        // Extract title and description from response
         String body = response.body();
         String title = extractJsonField(body, "title");
         String description = extractJsonField(body, "description");
 
         if (title == null) return null;
 
-        // Truncate description to keep Grok prompt short
         String shortDesc = description != null && description.length() > 300
             ? description.substring(0, 300) : description;
 
-        return classifyWithGrok(
+        return classifyWithGemini(
             "YouTube video title: " + title + "\nDescription: " + shortDesc
         );
     }
@@ -122,7 +114,6 @@ public class ContentAnalysisService {
     // ── Generic URL Analysis ─────────────────────────────────────────────
 
     private String analyzeGenericUrl(String url) throws Exception {
-        // Only analyze sites that could be ambiguous
         if (!isAmbiguousSite(url)) return null;
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -135,10 +126,7 @@ public class ContentAnalysisService {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         String html = response.body();
 
-        // Extract title tag
         String title = extractHtmlTag(html, "title");
-
-        // Extract meta description
         String metaDesc = extractMetaDescription(html);
 
         if (title == null && metaDesc == null) return null;
@@ -146,11 +134,10 @@ public class ContentAnalysisService {
         String content = "Page title: " + (title != null ? title : "unknown");
         if (metaDesc != null) content += "\nMeta description: " + metaDesc;
 
-        return classifyWithGrok(content);
+        return classifyWithGemini(content);
     }
 
     private boolean isAmbiguousSite(String url) {
-        // Sites where content type matters — not obviously work or entertainment
         return url.contains("linkedin.com")
             || url.contains("reddit.com")
             || url.contains("twitter.com")
@@ -160,64 +147,60 @@ public class ContentAnalysisService {
             || url.contains("quora.com");
     }
 
-    // ── Grok Classification ──────────────────────────────────────────────
+    // ── Gemini Classification ────────────────────────────────────────────
 
-    private String classifyWithGrok(String content) throws Exception {
-        if (grokApiKey == null || grokApiKey.isEmpty()) {
-            System.out.println("[ContentAnalysis] Grok API key not set — skipping classification");
+    private String classifyWithGemini(String content) throws Exception {
+        if (geminiApiKey == null || geminiApiKey.isEmpty()) {
+            System.out.println("[ContentAnalysis] Gemini API key not set — skipping classification");
             return null;
         }
 
-        String prompt = """
-            Classify the following web content into exactly one category.
-            Reply with ONLY one word from this list: work, educational, entertainment, social, other
+        String prompt = "Classify the following web content into exactly one category. "
+            + "Reply with ONLY one word from this list: work, educational, entertainment, social, other\\n\\n"
+            + "Rules:\\n"
+            + "- work: professional tools, coding, productivity, business tasks\\n"
+            + "- educational: learning, tutorials, courses, academic research, how-to guides\\n"
+            + "- entertainment: videos for fun, gaming, memes, news for leisure, social browsing\\n"
+            + "- social: messaging, social media not for learning\\n"
+            + "- other: unclear or mixed\\n\\n"
+            + "Content to classify:\\n"
+            + content.replace("\"", "\\\"").replace("\n", "\\n")
+            + "\\n\\nReply with one word only.";
 
-            Rules:
-            - work: professional tools, coding, productivity, business tasks
-            - educational: learning, tutorials, courses, academic research, how-to guides
-            - entertainment: videos for fun, gaming, memes, news for leisure, social browsing
-            - social: messaging, social media not for learning
-            - other: unclear or mixed
+        // Gemini REST API — no SDK needed, pure HTTP
+        String requestBody = "{"
+            + "\"contents\": [{"
+            + "\"parts\": [{\"text\": \"" + prompt + "\"}]"
+            + "}],"
+            + "\"generationConfig\": {"
+            + "\"maxOutputTokens\": 10,"
+            + "\"temperature\": 0.0"
+            + "}"
+            + "}";
 
-            Content to classify:
-            """ + content + """
-
-            Reply with one word only.
-            """;
-
-        // Grok uses OpenAI-compatible API format
-        String requestBody = """
-            {
-                "model": "grok-3-mini",
-                "max_tokens": 10,
-                "messages": [{"role": "user", "content": "%s"}]
-            }
-            """.formatted(prompt.replace("\"", "\\\"").replace("\n", "\\n"));
+        String apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+            + "?key=" + geminiApiKey;
 
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create("https://api.x.ai/v1/chat/completions"))
+            .uri(URI.create(apiUrl))
             .timeout(Duration.ofSeconds(5))
             .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer " + grokApiKey)
             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
             .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
-            System.out.println("[ContentAnalysis] Grok API error: " + response.statusCode() + " — " + response.body());
+            System.out.println("[ContentAnalysis] Gemini API error: " + response.statusCode() + " — " + response.body());
             return null;
         }
 
-        String responseBody = response.body();
-        String result = extractGrokResponse(responseBody);
-
+        String result = extractGeminiResponse(response.body());
         if (result == null) return null;
 
         result = result.trim().toLowerCase();
         System.out.println("[ContentAnalysis] Classified as: " + result);
 
-        // Validate response is one of our expected categories
         if (result.equals("work") || result.equals("educational") ||
             result.equals("entertainment") || result.equals("social") || result.equals("other")) {
             return result;
@@ -242,7 +225,6 @@ public class ContentAnalysisService {
         Matcher matcher = pattern.matcher(html);
         if (matcher.find()) return matcher.group(1).trim();
 
-        // Try reversed attribute order
         pattern = Pattern.compile(
             "<meta[^>]*content=[\"']([^\"']+)[\"'][^>]*name=[\"']description[\"']",
             Pattern.CASE_INSENSITIVE);
@@ -256,10 +238,10 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    // Grok uses OpenAI-compatible response format:
-    // {"choices": [{"message": {"content": "educational"}}]}
-    private String extractGrokResponse(String json) {
-        Pattern pattern = Pattern.compile("\"content\"\\s*:\\s*\"([^\"]+)\"");
+    // Gemini response format:
+    // {"candidates": [{"content": {"parts": [{"text": "educational"}]}}]}
+    private String extractGeminiResponse(String json) {
+        Pattern pattern = Pattern.compile("\"text\"\\s*:\\s*\"([^\"]+)\"");
         Matcher matcher = pattern.matcher(json);
         return matcher.find() ? matcher.group(1) : null;
     }
