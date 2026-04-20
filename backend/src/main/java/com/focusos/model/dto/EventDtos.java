@@ -36,7 +36,9 @@ public class EventDtos {
     public static class EventRequest {
         private String sessionId;
         private Instant timestamp;
-        private String activeUrl;  // full URL of active tab — used for content analysis
+        private String activeUrl;     // full URL of active tab
+        private String pageTitle;     // document.title from Chrome extension
+        private String pageDescription; // meta description from Chrome extension
 
         @NotNull
         private SignalPayload signals;
@@ -48,6 +50,10 @@ public class EventDtos {
         public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
         public String getActiveUrl() { return activeUrl; }
         public void setActiveUrl(String activeUrl) { this.activeUrl = activeUrl; }
+        public String getPageTitle() { return pageTitle; }
+        public void setPageTitle(String pageTitle) { this.pageTitle = pageTitle; }
+        public String getPageDescription() { return pageDescription; }
+        public void setPageDescription(String pageDescription) { this.pageDescription = pageDescription; }
         public SignalPayload getSignals() { return signals; }
         public void setSignals(SignalPayload signals) { this.signals = signals; }
         public int getWindowCount() { return windowCount; }

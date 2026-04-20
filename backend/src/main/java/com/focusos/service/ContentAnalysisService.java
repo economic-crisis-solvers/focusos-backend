@@ -8,7 +8,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -16,16 +15,15 @@ import java.util.regex.Pattern;
 /**
  * ContentAnalysisService
  * ----------------------
- * Analyzes what a user is actually viewing on a URL to give a more accurate
+ * Analyzes what a user is actually viewing to give a more accurate
  * URL category than simple domain matching.
  *
- * Supports:
- *   - YouTube: fetches video title + description via YouTube Data API → Groq
- *   - Reddit: classifies by subreddit name (no HTTP fetch needed)
- *   - Twitter/X: always social (blocks scraping anyway)
- *   - LinkedIn, Medium, Substack, Quora: fetch page meta → Groq
- *
- * Result overrides the generic url_category from Chrome extension.
+ * Priority order for classification:
+ *   1. pageTitle + pageDescription from Chrome extension DOM (most accurate, no scraping)
+ *   2. YouTube Data API for YouTube URLs (when extension metadata unavailable)
+ *   3. Reddit subreddit name lookup (rule-based, no API needed)
+ *   4. Hardcoded rules for Twitter, Quora, LinkedIn (block scraping)
+ *   5. Groq classification for Medium, Substack (allow scraping)
  */
 @Service
 public class ContentAnalysisService {
@@ -46,7 +44,7 @@ public class ContentAnalysisService {
     private static final Pattern REDDIT_SUBREDDIT_PATTERN =
         Pattern.compile("reddit\\.com/r/([a-zA-Z0-9_]+)");
 
-    // ── Reddit subreddit category maps ────────────────────────────────────
+    // ── Reddit subreddit maps ─────────────────────────────────────────────
 
     private static final Set<String> EDUCATIONAL_SUBREDDITS = Set.of(
         "learnprogramming", "learnjava", "learnpython", "learnjavascript",
@@ -65,7 +63,7 @@ public class ContentAnalysisService {
     private static final Set<String> WORK_SUBREDDITS = Set.of(
         "productivity", "entrepreneur", "startups", "smallbusiness",
         "projectmanagement", "agile", "sysadmin", "aws", "azure",
-        "googlecloud", "devops", "softwareengineering", "backend",
+        "googlecloud", "softwareengineering", "backend",
         "frontend", "fullstack", "dataengineering", "businessanalysis",
         "remotework", "freelance", "careerguidance", "jobs"
     );
@@ -87,31 +85,63 @@ public class ContentAnalysisService {
     );
 
     /**
-     * Analyzes a URL and returns a refined category.
-     * Returns null if analysis fails or URL isn't worth analyzing —
-     * caller should fall back to Chrome extension's category.
+     * Main entry point.
+     * Now accepts pageTitle and pageDescription directly from Chrome extension.
+     * If provided, these are used directly for Groq classification — no scraping needed.
+     * Falls back to URL-based analysis if not provided.
      */
-    public String analyzeUrl(String url) {
+    public String analyzeUrl(String url, String pageTitle, String pageDescription) {
         if (url == null || url.isEmpty()) return null;
 
         try {
-            // YouTube — use YouTube Data API
+            // ── Priority 1: Use Chrome extension DOM metadata if available ──
+            // This is always accurate — extension reads directly from the live page
+            boolean hasMetadata = (pageTitle != null && !pageTitle.isEmpty())
+                || (pageDescription != null && !pageDescription.isEmpty());
+
+            if (hasMetadata) {
+                // For YouTube, still use YouTube API for richer metadata
+                // unless we already have good page metadata
+                boolean isYouTube = url.contains("youtube.com") || url.contains("youtu.be");
+
+                if (!isYouTube) {
+                    // For all non-YouTube sites, use extension metadata directly
+                    String content = "";
+                    if (pageTitle != null && !pageTitle.isEmpty())
+                        content += "Page title: " + pageTitle;
+                    if (pageDescription != null && !pageDescription.isEmpty())
+                        content += "\nDescription: " + pageDescription;
+
+                    System.out.println("[ContentAnalysis] Using Chrome extension metadata for: " + url);
+                    return classifyWithGroq(content);
+                }
+            }
+
+            // ── Priority 2: YouTube — use YouTube Data API ─────────────────
             if (url.contains("youtube.com") || url.contains("youtu.be")) {
                 return analyzeYouTubeUrl(url);
             }
 
-            // Reddit — classify by subreddit name, no scraping needed
+            // ── Priority 3: Reddit — subreddit name lookup ─────────────────
             if (url.contains("reddit.com")) {
                 return analyzeRedditUrl(url);
             }
 
-            // Twitter/X — always social, blocks scraping anyway
+            // ── Priority 4: Hardcoded rules (block scrapers) ───────────────
             if (url.contains("twitter.com") || url.contains("x.com")) {
-                System.out.println("[ContentAnalysis] Twitter/X detected → social");
+                System.out.println("[ContentAnalysis] Twitter/X → social (hardcoded)");
                 return "social";
             }
+            if (url.contains("quora.com")) {
+                System.out.println("[ContentAnalysis] Quora → educational (hardcoded)");
+                return "educational";
+            }
+            if (url.contains("linkedin.com")) {
+                System.out.println("[ContentAnalysis] LinkedIn → work (hardcoded)");
+                return "work";
+            }
 
-            // LinkedIn, Medium, Substack, Quora — fetch page meta → Groq
+            // ── Priority 5: Medium, Substack — fetch + Groq ────────────────
             return analyzeGenericUrl(url);
 
         } catch (Exception e) {
@@ -120,17 +150,22 @@ public class ContentAnalysisService {
         }
     }
 
+    /**
+     * Backwards-compatible overload — called when no metadata provided.
+     * EventController calls the 3-arg version; this exists as safety fallback.
+     */
+    public String analyzeUrl(String url) {
+        return analyzeUrl(url, null, null);
+    }
+
     // ── Reddit Analysis ───────────────────────────────────────────────────
 
     private String analyzeRedditUrl(String url) {
         Matcher matcher = REDDIT_SUBREDDIT_PATTERN.matcher(url);
-        if (!matcher.find()) {
-            // No subreddit in URL (e.g. reddit.com homepage) — treat as social
-            return "social";
-        }
+        if (!matcher.find()) return "social";
 
         String subreddit = matcher.group(1).toLowerCase();
-        System.out.println("[ContentAnalysis] Reddit subreddit detected: r/" + subreddit);
+        System.out.println("[ContentAnalysis] Reddit subreddit: r/" + subreddit);
 
         if (EDUCATIONAL_SUBREDDITS.contains(subreddit)) {
             System.out.println("[ContentAnalysis] Classified as: educational");
@@ -149,13 +184,12 @@ public class ContentAnalysisService {
             return "social";
         }
 
-        // Unknown subreddit — fall back to Groq with just the subreddit name
+        // Unknown subreddit — ask Groq
         System.out.println("[ContentAnalysis] Unknown subreddit r/" + subreddit + " — asking Groq");
         try {
             return classifyWithGroq("Reddit community name: r/" + subreddit
                 + ". Classify what kind of content this community likely discusses.");
         } catch (Exception e) {
-            System.out.println("[ContentAnalysis] Groq fallback failed: " + e.getMessage());
             return "other";
         }
     }
@@ -164,7 +198,7 @@ public class ContentAnalysisService {
 
     private String analyzeYouTubeUrl(String url) throws Exception {
         if (youtubeApiKey == null || youtubeApiKey.isEmpty()) {
-            System.out.println("[ContentAnalysis] YouTube API key not set — skipping YouTube analysis");
+            System.out.println("[ContentAnalysis] YouTube API key not set");
             return null;
         }
 
@@ -174,7 +208,7 @@ public class ContentAnalysisService {
         String apiUrl = "https://www.googleapis.com/youtube/v3/videos"
             + "?id=" + videoId
             + "&part=snippet"
-            + "&fields=items(snippet(title,description,tags,categoryId))"
+            + "&fields=items(snippet(title,description))"
             + "&key=" + youtubeApiKey;
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -184,7 +218,6 @@ public class ContentAnalysisService {
             .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
         if (response.statusCode() != 200) {
             System.out.println("[ContentAnalysis] YouTube API error: " + response.statusCode());
             return null;
@@ -193,15 +226,12 @@ public class ContentAnalysisService {
         String body = response.body();
         String title = extractJsonField(body, "title");
         String description = extractJsonField(body, "description");
-
         if (title == null) return null;
 
         String shortDesc = description != null && description.length() > 300
             ? description.substring(0, 300) : description;
 
-        return classifyWithGroq(
-            "YouTube video title: " + title + "\nDescription: " + shortDesc
-        );
+        return classifyWithGroq("YouTube video title: " + title + "\nDescription: " + shortDesc);
     }
 
     private String extractYouTubeVideoId(String url) {
@@ -209,10 +239,10 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    // ── Generic URL Analysis (LinkedIn, Medium, Substack, Quora) ─────────
+    // ── Generic URL Analysis (Medium, Substack) ───────────────────────────
 
     private String analyzeGenericUrl(String url) throws Exception {
-        if (!isAmbiguousSite(url)) return null;
+        if (!isScrapableSite(url)) return null;
 
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
@@ -226,7 +256,6 @@ public class ContentAnalysisService {
 
         String title = extractHtmlTag(html, "title");
         String metaDesc = extractMetaDescription(html);
-
         if (title == null && metaDesc == null) return null;
 
         String content = "Page title: " + (title != null ? title : "unknown");
@@ -235,18 +264,15 @@ public class ContentAnalysisService {
         return classifyWithGroq(content);
     }
 
-    private boolean isAmbiguousSite(String url) {
-        return url.contains("linkedin.com")
-            || url.contains("medium.com")
-            || url.contains("substack.com")
-            || url.contains("quora.com");
+    private boolean isScrapableSite(String url) {
+        return url.contains("medium.com") || url.contains("substack.com");
     }
 
     // ── Groq Classification ──────────────────────────────────────────────
 
     private String classifyWithGroq(String content) throws Exception {
         if (groqApiKey == null || groqApiKey.isEmpty()) {
-            System.out.println("[ContentAnalysis] Groq API key not set — skipping classification");
+            System.out.println("[ContentAnalysis] Groq API key not set");
             return null;
         }
 
@@ -298,7 +324,7 @@ public class ContentAnalysisService {
         return null;
     }
 
-    // ── HTML Parsing Helpers ─────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────
 
     private String extractHtmlTag(String html, String tag) {
         Pattern pattern = Pattern.compile("<" + tag + "[^>]*>([^<]+)</" + tag + ">",
@@ -327,7 +353,6 @@ public class ContentAnalysisService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    // OpenAI-compatible response: {"choices": [{"message": {"content": "educational"}}]}
     private String extractGroqResponse(String json) {
         Pattern pattern = Pattern.compile("\"content\"\\s*:\\s*\"([^\"]+)\"");
         Matcher matcher = pattern.matcher(json);

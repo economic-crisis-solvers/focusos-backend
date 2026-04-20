@@ -94,7 +94,7 @@ public class EventController {
         String rawUrl = body.getActiveUrl();
         if (rawUrl != null && !rawUrl.isEmpty()) {
             try {
-                enrichedCategory = contentAnalysisService.analyzeUrl(rawUrl);
+                enrichedCategory = contentAnalysisService.analyzeUrl(rawUrl, body.getPageTitle(), body.getPageDescription());
             } catch (Exception e) {
                 log.warn("[Events] Content analysis failed: {}", e.getMessage());
             }
