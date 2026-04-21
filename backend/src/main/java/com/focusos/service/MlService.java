@@ -76,22 +76,28 @@ public class MlService {
 
     // ── ONNX inference ───────────────────────────────────────────────────
 
-    private int runOnnxInference(EventDtos.SignalPayload s) {
-        try {
-            float[] features  = engineerFeatures(s);
-            String  inputName = session.getInputNames().iterator().next();
-            OnnxTensor tensor = OnnxTensor.createTensor(env, new float[][]{features});
+    @SuppressWarnings("unchecked")
+private int runOnnxInference(EventDtos.SignalPayload s) {
+    try {
+        float[] features  = engineerFeatures(s);
+        String  inputName = session.getInputNames().iterator().next();
+        OnnxTensor tensor = OnnxTensor.createTensor(env, new float[][]{features});
 
-            try (OrtSession.Result result = session.run(Collections.singletonMap(inputName, tensor))) {
-                Object output = result.get(0).getValue();
+        try (OrtSession.Result result = session.run(Collections.singletonMap(inputName, tensor))) {
+            // Output 0: output_label (long[]) — class label
+            // Output 1: output_probability (sequence of maps) — probabilities per class
+            // We need output 1 for the weighted score formula
 
-                if (output instanceof float[][] proba) {
-                    // Classes in alphabetical LabelEncoder order:
-                    // 0=distracted, 1=drifting, 2=focused
-                    // score = P(distracted)*0 + P(drifting)*50 + P(focused)*100
-                    float pDistracted = proba[0][0];
-                    float pDrifting   = proba[0][1];
-                    float pFocused    = proba[0][2];
+            Object probOutput = result.get(1).getValue();
+
+            // probOutput is List<Map<Long, Float>> — one map per sample
+            if (probOutput instanceof java.util.List<?> probList && !probList.isEmpty()) {
+                Object mapObj = probList.get(0);
+                if (mapObj instanceof java.util.Map<?, ?> probMap) {
+                    // Keys are Long (class index): 0=distracted, 1=drifting, 2=focused
+                    float pDistracted = getProb(probMap, 0L);
+                    float pDrifting   = getProb(probMap, 1L);
+                    float pFocused    = getProb(probMap, 2L);
                     int raw = (int) (pDistracted * 0 + pDrifting * 50 + pFocused * 100);
                     log.info("[ML] ONNX score: {} (P(d)={} P(dr)={} P(f)={})",
                         raw,
@@ -99,16 +105,28 @@ public class MlService {
                         String.format("%.2f", pDrifting),
                         String.format("%.2f", pFocused));
                     return raw;
-                } else if (output instanceof long[] labels) {
-                    // Direct class label fallback
-                    return labels[0] == 2 ? 85 : labels[0] == 1 ? 50 : 15;
                 }
             }
-        } catch (OrtException e) {
-            log.warn("[ML] Inference error: {}. Falling back to rules.", e.getMessage());
+
+            // Fallback: use label directly if probability parsing fails
+            Object labelOutput = result.get(0).getValue();
+            if (labelOutput instanceof long[] labels) {
+                log.warn("[ML] Using label fallback: {}", labels[0]);
+                return labels[0] == 2 ? 85 : labels[0] == 1 ? 50 : 15;
+            }
         }
-        return ruleBased(s);
+    } catch (OrtException e) {
+        log.warn("[ML] Inference error: {}. Falling back to rules.", e.getMessage());
     }
+    return ruleBased(s);
+}
+
+private float getProb(java.util.Map<?, ?> map, Long key) {
+    Object val = map.get(key);
+    if (val instanceof Float f) return f;
+    if (val instanceof Double d) return d.floatValue();
+    return 0f;
+}
 
     // ── Feature engineering — 11 features, matches Dev D's FEATURE_ORDER ─
 
