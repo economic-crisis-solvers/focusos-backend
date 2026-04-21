@@ -89,24 +89,35 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
             log.info("[ML] probOutput type: {}", probOutput.getClass().getName());
 
             if (probOutput instanceof java.util.List probList && !probList.isEmpty()) {
-                Object mapObj = probList.get(0);
-                log.info("[ML] mapObj type: {}", mapObj.getClass().getName());
+    Object mapObj = probList.get(0);
+    log.info("[ML] mapObj type: {}", mapObj.getClass().getName());
 
-                if (mapObj instanceof java.util.Map probMap) {
-                    log.info("[ML] probMap: {}", probMap);
-                    // Keys are Integer in ONNX Runtime Java
-                    float pDistracted = extractProb(probMap, 0);
-                    float pDrifting   = extractProb(probMap, 1);
-                    float pFocused    = extractProb(probMap, 2);
-                    int raw = (int)(pDistracted * 0 + pDrifting * 50 + pFocused * 100);
-                    log.info("[ML] ONNX score: {} P(d)={} P(dr)={} P(f)={}",
-                        raw,
-                        String.format("%.3f", pDistracted),
-                        String.format("%.3f", pDrifting),
-                        String.format("%.3f", pFocused));
-                    return raw;
-                }
-            }
+    // Handle ai.onnxruntime.OnnxMap — must call getValue() to get the actual map
+    java.util.Map<?, ?> probMap = null;
+    if (mapObj instanceof ai.onnxruntime.OnnxMap onnxMap) {
+        Object inner = onnxMap.getValue();
+        log.info("[ML] OnnxMap inner type: {}", inner.getClass().getName());
+        if (inner instanceof java.util.Map<?, ?> m) {
+            probMap = m;
+        }
+    } else if (mapObj instanceof java.util.Map<?, ?> m) {
+        probMap = m;
+    }
+
+    if (probMap != null) {
+        log.info("[ML] probMap contents: {}", probMap);
+        float pDistracted = extractProb(probMap, 0);
+        float pDrifting   = extractProb(probMap, 1);
+        float pFocused    = extractProb(probMap, 2);
+        int raw = (int)(pDistracted * 0 + pDrifting * 50 + pFocused * 100);
+        log.info("[ML] ONNX score: {} P(d)={} P(dr)={} P(f)={}",
+            raw,
+            String.format("%.3f", pDistracted),
+            String.format("%.3f", pDrifting),
+            String.format("%.3f", pFocused));
+        return raw;
+    }
+}
 
             // Label fallback
             Object labelOutput = result.get(0).getValue();
@@ -122,24 +133,20 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
 }
 
 @SuppressWarnings({"rawtypes", "unchecked"})
-private float extractProb(java.util.Map probMap, int classIndex) {
-    // Try Integer key first (ONNX Runtime Java uses Integer keys)
+private float extractProb(java.util.Map<?, ?> probMap, int classIndex) {
     Object val = probMap.get(classIndex);
-    // Try Long key as fallback
     if (val == null) val = probMap.get((long) classIndex);
-    // Iterate as last resort
     if (val == null) {
-        for (Object entry : probMap.entrySet()) {
-            java.util.Map.Entry e = (java.util.Map.Entry) entry;
-            if (e.getKey() instanceof Number n && n.intValue() == classIndex) {
-                val = e.getValue();
+        for (java.util.Map.Entry<?, ?> entry : probMap.entrySet()) {
+            if (entry.getKey() instanceof Number n && n.intValue() == classIndex) {
+                val = entry.getValue();
                 break;
             }
         }
     }
-    if (val instanceof Float f)   return f;
-    if (val instanceof Double d)  return d.floatValue();
-    if (val instanceof Number n)  return n.floatValue();
+    if (val instanceof Float f)  return f;
+    if (val instanceof Double d) return d.floatValue();
+    if (val instanceof Number n) return n.floatValue();
     log.warn("[ML] Could not extract prob for class {}, map keys: {}", classIndex, probMap.keySet());
     return 0f;
 }
