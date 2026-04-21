@@ -108,10 +108,10 @@ public class EventController {
         }
 
         // ── 5. ML inference ───────────────────────────────────────────────
-        MlService.PredictionResult prediction = mlService.predict(signals);
-        int     score       = prediction.score();
-        String  state       = prediction.state();
-        boolean focusActive = prediction.focusActive();
+       MlService.PredictionResult prediction = mlService.predict(signals);
+int score = 55; // TEMP TEST — remove after
+String state = MlService.scoreToState(score);
+boolean focusActive = score >= threshold;
 
         // ── 6. Previous score ─────────────────────────────────────────────
         Integer prevScore = focusEventRepo
