@@ -76,7 +76,7 @@ public class MlService {
 
     // ── ONNX inference ───────────────────────────────────────────────────
 
-    @SuppressWarnings("unchecked")
+@SuppressWarnings({"unchecked", "rawtypes"})
 private int runOnnxInference(EventDtos.SignalPayload s) {
     try {
         float[] features  = engineerFeatures(s);
@@ -84,32 +84,31 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
         OnnxTensor tensor = OnnxTensor.createTensor(env, new float[][]{features});
 
         try (OrtSession.Result result = session.run(Collections.singletonMap(inputName, tensor))) {
-            // Output 0: output_label (long[]) — class label
-            // Output 1: output_probability (sequence of maps) — probabilities per class
-            // We need output 1 for the weighted score formula
-
+            // Output 1 is the probability map sequence
             Object probOutput = result.get(1).getValue();
+            log.info("[ML] probOutput type: {}", probOutput.getClass().getName());
 
-            // probOutput is List<Map<Long, Float>> — one map per sample
-            if (probOutput instanceof java.util.List<?> probList && !probList.isEmpty()) {
+            if (probOutput instanceof java.util.List probList && !probList.isEmpty()) {
                 Object mapObj = probList.get(0);
-                if (mapObj instanceof java.util.Map<?, ?> probMap) {
-                    log.info("[ML] Prob map keys: {}", probMap.keySet());
-    // Keys are Long (class index): 0=distracted, 1=drifting, 2=focused
-                    float pDistracted = getProb(probMap, 0L);
-                    float pDrifting   = getProb(probMap, 1L);
-                    float pFocused    = getProb(probMap, 2L);
-                    int raw = (int) (pDistracted * 0 + pDrifting * 50 + pFocused * 100);
-                    log.info("[ML] ONNX score: {} (P(d)={} P(dr)={} P(f)={})",
+                log.info("[ML] mapObj type: {}", mapObj.getClass().getName());
+
+                if (mapObj instanceof java.util.Map probMap) {
+                    log.info("[ML] probMap: {}", probMap);
+                    // Keys are Integer in ONNX Runtime Java
+                    float pDistracted = extractProb(probMap, 0);
+                    float pDrifting   = extractProb(probMap, 1);
+                    float pFocused    = extractProb(probMap, 2);
+                    int raw = (int)(pDistracted * 0 + pDrifting * 50 + pFocused * 100);
+                    log.info("[ML] ONNX score: {} P(d)={} P(dr)={} P(f)={}",
                         raw,
-                        String.format("%.2f", pDistracted),
-                        String.format("%.2f", pDrifting),
-                        String.format("%.2f", pFocused));
+                        String.format("%.3f", pDistracted),
+                        String.format("%.3f", pDrifting),
+                        String.format("%.3f", pFocused));
                     return raw;
                 }
             }
 
-            // Fallback: use label directly if probability parsing fails
+            // Label fallback
             Object labelOutput = result.get(0).getValue();
             if (labelOutput instanceof long[] labels) {
                 log.warn("[ML] Using label fallback: {}", labels[0]);
@@ -122,22 +121,26 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
     return ruleBased(s);
 }
 
-private float getProb(java.util.Map<?, ?> map, Long key) {
-    // Try Long key first, then Integer key — ONNX Runtime Java varies by version
-    Object val = map.get(key);
-    if (val == null) val = map.get(key.intValue());
+@SuppressWarnings({"rawtypes", "unchecked"})
+private float extractProb(java.util.Map probMap, int classIndex) {
+    // Try Integer key first (ONNX Runtime Java uses Integer keys)
+    Object val = probMap.get(classIndex);
+    // Try Long key as fallback
+    if (val == null) val = probMap.get((long) classIndex);
+    // Iterate as last resort
     if (val == null) {
-        // Last resort — iterate and match by numeric value
-        for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
-            if (entry.getKey() instanceof Number n && n.longValue() == key) {
-                val = entry.getValue();
+        for (Object entry : probMap.entrySet()) {
+            java.util.Map.Entry e = (java.util.Map.Entry) entry;
+            if (e.getKey() instanceof Number n && n.intValue() == classIndex) {
+                val = e.getValue();
                 break;
             }
         }
     }
-    if (val instanceof Float f) return f;
-    if (val instanceof Double d) return d.floatValue();
-    if (val instanceof Number n) return n.floatValue();
+    if (val instanceof Float f)   return f;
+    if (val instanceof Double d)  return d.floatValue();
+    if (val instanceof Number n)  return n.floatValue();
+    log.warn("[ML] Could not extract prob for class {}, map keys: {}", classIndex, probMap.keySet());
     return 0f;
 }
 
