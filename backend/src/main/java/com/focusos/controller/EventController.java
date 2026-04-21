@@ -151,11 +151,14 @@ public class EventController {
 
         // Only open/close distraction events and trigger DND during work hours
         if (withinWorkHours) {
-            if (crossedBelow) {
-                DistractionEvent distraction = new DistractionEvent();
-                distraction.setUserId(userId);
-                distraction.setStartedAt(Instant.now());
-                distraction.setTriggerCategory(signals.getUrlCategory());
+            String currentCategory = signals.getUrlCategory() == null ? "other" : signals.getUrlCategory().toLowerCase();
+boolean isProductiveUrl = currentCategory.equals("work") || currentCategory.equals("educational");
+
+if (crossedBelow && !isProductiveUrl) {
+    DistractionEvent distraction = new DistractionEvent();
+    distraction.setUserId(userId);
+    distraction.setStartedAt(Instant.now());
+    distraction.setTriggerCategory(signals.getUrlCategory());
                 distraction.setResidueMinutesAdded(ResidueService.residueForDistraction(0));
                 distractionRepo.save(distraction);
                 log.info("[Events] Focus dropped below threshold for user {}", userId);

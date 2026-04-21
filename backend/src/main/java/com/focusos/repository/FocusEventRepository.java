@@ -22,16 +22,13 @@ public interface FocusEventRepository extends JpaRepository<FocusEvent, UUID> {
     // Fixed: calculate focused minutes using simple SUM of intervals between consecutive rows
     // Uses a subquery approach to avoid window-function-inside-aggregate error
     @Query(value = """
-        SELECT COALESCE(
-            EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) / 60,
-            0
-        )
-        FROM focus_events
-        WHERE user_id = :userId
-          AND state IN ('deep_focus', 'engaged')
-          AND timestamp > NOW() - INTERVAL '24 hours'
-        """, nativeQuery = true)
-    double sumFocusedMinutesToday(@Param("userId") UUID userId);
+    SELECT COALESCE(COUNT(*) * 0.5, 0)
+    FROM focus_events
+    WHERE user_id = :userId
+      AND state IN ('deep_focus', 'engaged')
+      AND timestamp > NOW() - INTERVAL '24 hours'
+    """, nativeQuery = true)
+double sumFocusedMinutesToday(@Param("userId") UUID userId);
 
     @Query(value = """
         SELECT
