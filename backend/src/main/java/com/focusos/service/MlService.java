@@ -169,16 +169,35 @@ private float getProb(java.util.Map<?, ?> map, Long key) {
         double tabSwitches = s.getTabSwitchesPerMin();
 
         // Entertainment URL — cap score at 50 (can't be "focused" on Netflix)
-        if (cat.equals("entertainment") && score > 50) {
-            log.info("[ML] Guardrail: entertainment URL capped score {} → 50", score);
-            score = 50;
-        }
+       if (cat.equals("entertainment")) {
+    double sessionMins = s.getActiveMinutesThisSession();
+    if (sessionMins > 5 && score > 25) {
+        log.info("[ML] Guardrail: entertainment >5min capped score {} → 25", score);
+        score = 25;
+    } else if (sessionMins > 2 && score > 35) {
+        log.info("[ML] Guardrail: entertainment >2min capped score {} → 35", score);
+        score = 35;
+    } else if (score > 50) {
+        log.info("[ML] Guardrail: entertainment URL capped score {} → 50", score);
+        score = 50;
+    }
+}
 
         // Social URL — cap score at 45 (social media is never deep focus)
-        if (cat.equals("social") && score > 45) {
-            log.info("[ML] Guardrail: social URL capped score {} → 45", score);
-            score = 45;
-        }
+       // Social URL — cap based on duration
+if (cat.equals("social")) {
+    double sessionMins = s.getActiveMinutesThisSession();
+    if (sessionMins > 5 && score > 20) {
+        log.info("[ML] Guardrail: social >5min capped score {} → 20", score);
+        score = 20;
+    } else if (sessionMins > 2 && score > 30) {
+        log.info("[ML] Guardrail: social >2min capped score {} → 30", score);
+        score = 30;
+    } else if (score > 45) {
+        log.info("[ML] Guardrail: social URL capped score {} → 45", score);
+        score = 45;
+    }
+}
 
         // Educational URL — floor score at 40 (learning is never collapsed)
         if (cat.equals("educational") && score < 40) {
