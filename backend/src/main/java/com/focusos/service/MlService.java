@@ -94,7 +94,8 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
             if (probOutput instanceof java.util.List<?> probList && !probList.isEmpty()) {
                 Object mapObj = probList.get(0);
                 if (mapObj instanceof java.util.Map<?, ?> probMap) {
-                    // Keys are Long (class index): 0=distracted, 1=drifting, 2=focused
+                    log.info("[ML] Prob map keys: {}", probMap.keySet());
+    // Keys are Long (class index): 0=distracted, 1=drifting, 2=focused
                     float pDistracted = getProb(probMap, 0L);
                     float pDrifting   = getProb(probMap, 1L);
                     float pFocused    = getProb(probMap, 2L);
@@ -122,9 +123,21 @@ private int runOnnxInference(EventDtos.SignalPayload s) {
 }
 
 private float getProb(java.util.Map<?, ?> map, Long key) {
+    // Try Long key first, then Integer key — ONNX Runtime Java varies by version
     Object val = map.get(key);
+    if (val == null) val = map.get(key.intValue());
+    if (val == null) {
+        // Last resort — iterate and match by numeric value
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() instanceof Number n && n.longValue() == key) {
+                val = entry.getValue();
+                break;
+            }
+        }
+    }
     if (val instanceof Float f) return f;
     if (val instanceof Double d) return d.floatValue();
+    if (val instanceof Number n) return n.floatValue();
     return 0f;
 }
 
