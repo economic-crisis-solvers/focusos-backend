@@ -87,6 +87,7 @@ public class EventController {
         boolean withinWorkHours = isWithinWorkHours(settings);
         if (!withinWorkHours) {
             log.info("[Events] Outside work hours for user {} — passive mode only", userId);
+            consecutiveFocusCount.put(userId.toString(), 0);
         }
 
         // ── 4. Content analysis (async — enriches URL category) ───────────
