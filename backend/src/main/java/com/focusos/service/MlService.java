@@ -19,14 +19,17 @@ public class MlService {
     private static final Logger log = LoggerFactory.getLogger(MlService.class);
 
     // ── Feature order — must exactly match Dev D's FEATURE_ORDER ─────────
-    // ["tab_switches_per_min", "typing_mean_interval_ms", "typing_std_dev_ms",
-    //  "scroll_velocity_px_sec", "scroll_direction_changes", "idle_flag",
-    //  "url_category_work", "url_category_social", "url_category_entertainment",
-    //  "session_minutes"]
-
-    // ── Score anchors — from Dev D's SCORE_ANCHORS ────────────────────────
-    // focused=100, drifting=50, distracted=0
-    // LabelEncoder alphabetical order: 0=distracted, 1=drifting, 2=focused
+    // 0.  tab_switches_per_min
+    // 1.  typing_mean_interval_ms
+    // 2.  typing_std_dev_ms
+    // 3.  scroll_velocity_px_sec
+    // 4.  scroll_direction_changes
+    // 5.  idle_flag
+    // 6.  url_category_work (one-hot)
+    // 7.  url_category_social (one-hot)
+    // 8.  url_category_entertainment (one-hot)
+    // 9.  url_category_educational (one-hot) ← NEW
+    // 10. session_minutes                    ← was 9, now 10
 
     @Value("${ml.model-path:model.onnx}")
     private String modelPath;
@@ -59,6 +62,12 @@ public class MlService {
         } else {
             score = ruleBased(signals);
         }
+
+        // ── Option B: Post-processing guardrails ──────────────────────────
+        // Safety net — corrects obviously wrong scores when model is uncertain.
+        // Applied after inference regardless of model or rule-based path.
+        score = applyGuardrails(score, signals);
+
         score = Math.max(0, Math.min(100, score));
         String  state       = scoreToState(score);
         boolean focusActive = score >= 45;
@@ -77,14 +86,21 @@ public class MlService {
                 Object output = result.get(0).getValue();
 
                 if (output instanceof float[][] proba) {
-                    // Classes in alphabetical LabelEncoder order: 0=distracted, 1=drifting, 2=focused
+                    // Classes in alphabetical LabelEncoder order:
+                    // 0=distracted, 1=drifting, 2=focused
                     // score = P(distracted)*0 + P(drifting)*50 + P(focused)*100
                     float pDistracted = proba[0][0];
                     float pDrifting   = proba[0][1];
                     float pFocused    = proba[0][2];
-                    return (int) (pDistracted * 0 + pDrifting * 50 + pFocused * 100);
+                    int raw = (int) (pDistracted * 0 + pDrifting * 50 + pFocused * 100);
+                    log.info("[ML] ONNX score: {} (P(d)={} P(dr)={} P(f)={})",
+                        raw,
+                        String.format("%.2f", pDistracted),
+                        String.format("%.2f", pDrifting),
+                        String.format("%.2f", pFocused));
+                    return raw;
                 } else if (output instanceof long[] labels) {
-                    // Direct class label: 0=distracted, 1=drifting, 2=focused
+                    // Direct class label fallback
                     return labels[0] == 2 ? 85 : labels[0] == 1 ? 50 : 15;
                 }
             }
@@ -94,25 +110,68 @@ public class MlService {
         return ruleBased(s);
     }
 
-    // ── Feature engineering — matches Dev D's FEATURE_ORDER exactly ──────
+    // ── Feature engineering — 11 features, matches Dev D's FEATURE_ORDER ─
 
     private float[] engineerFeatures(EventDtos.SignalPayload s) {
         String cat = s.getUrlCategory() == null ? "other" : s.getUrlCategory().toLowerCase();
         return new float[]{
-            (float) s.getTabSwitchesPerMin(),           // 0: tab_switches_per_min
-            (float) s.getTypingMeanIntervalMs(),         // 1: typing_mean_interval_ms
-            (float) s.getTypingStdDevMs(),               // 2: typing_std_dev_ms
-            (float) s.getScrollVelocityPxSec(),          // 3: scroll_velocity_px_sec
-            (float) s.getScrollDirectionChanges(),       // 4: scroll_direction_changes
-            (float) s.getIdleFlag(),                     // 5: idle_flag
-            cat.equals("work")          ? 1f : 0f,      // 6: url_category_work
-            cat.equals("social")        ? 1f : 0f,      // 7: url_category_social
-            cat.equals("entertainment") ? 1f : 0f,      // 8: url_category_entertainment
-            (float) s.getActiveMinutesThisSession(),     // 9: session_minutes
+            (float) s.getTabSwitchesPerMin(),           //  0: tab_switches_per_min
+            (float) s.getTypingMeanIntervalMs(),         //  1: typing_mean_interval_ms
+            (float) s.getTypingStdDevMs(),               //  2: typing_std_dev_ms
+            (float) s.getScrollVelocityPxSec(),          //  3: scroll_velocity_px_sec
+            (float) s.getScrollDirectionChanges(),       //  4: scroll_direction_changes
+            (float) s.getIdleFlag(),                     //  5: idle_flag
+            cat.equals("work")          ? 1f : 0f,      //  6: url_category_work
+            cat.equals("social")        ? 1f : 0f,      //  7: url_category_social
+            cat.equals("entertainment") ? 1f : 0f,      //  8: url_category_entertainment
+            cat.equals("educational")   ? 1f : 0f,      //  9: url_category_educational ← NEW
+            (float) s.getActiveMinutesThisSession(),     // 10: session_minutes ← was 9
         };
     }
 
-    // ── Rule-based fallback (used until model.onnx is available) ─────────
+    // ── Option B: Post-processing guardrails ──────────────────────────────
+    // Corrects obviously wrong scores when ML model is uncertain.
+    // These are hard rules based on domain knowledge — not ML.
+
+    private int applyGuardrails(int score, EventDtos.SignalPayload s) {
+        String cat = s.getUrlCategory() == null ? "other" : s.getUrlCategory().toLowerCase();
+        double tabSwitches = s.getTabSwitchesPerMin();
+
+        // Entertainment URL — cap score at 50 (can't be "focused" on Netflix)
+        if (cat.equals("entertainment") && score > 50) {
+            log.info("[ML] Guardrail: entertainment URL capped score {} → 50", score);
+            score = 50;
+        }
+
+        // Social URL — cap score at 45 (social media is never deep focus)
+        if (cat.equals("social") && score > 45) {
+            log.info("[ML] Guardrail: social URL capped score {} → 45", score);
+            score = 45;
+        }
+
+        // Educational URL — floor score at 40 (learning is never collapsed)
+        if (cat.equals("educational") && score < 40) {
+            log.info("[ML] Guardrail: educational URL floored score {} → 40", score);
+            score = 40;
+        }
+
+        // High tab switching — cap score at 55 regardless of URL
+        // (can't be deeply focused if switching tabs 8+ times per minute)
+        if (tabSwitches > 8 && score > 55) {
+            log.info("[ML] Guardrail: high tab switches ({}) capped score {} → 55", tabSwitches, score);
+            score = Math.min(score, 55);
+        }
+
+        // Extreme tab switching — hard cap at 30
+        if (tabSwitches > 12) {
+            log.info("[ML] Guardrail: extreme tab switches ({}) capped score {} → 30", tabSwitches, score);
+            score = Math.min(score, 30);
+        }
+
+        return score;
+    }
+
+    // ── Rule-based fallback (used when model.onnx not available) ─────────
 
     private int ruleBased(EventDtos.SignalPayload s) {
         int score = 75;
@@ -121,8 +180,9 @@ public class MlService {
         else if (s.getTabSwitchesPerMin() > 4)  score -= 15;
 
         String cat = s.getUrlCategory() == null ? "other" : s.getUrlCategory().toLowerCase();
-        if (List.of("social","entertainment","news","shopping").contains(cat)) score -= 20;
-        else if (cat.equals("work")) score += 10;
+        if (List.of("social", "entertainment", "news", "shopping").contains(cat)) score -= 20;
+        else if (cat.equals("work"))        score += 10;
+        else if (cat.equals("educational")) score += 15;
 
         if (s.getIdleFlag() == 1)                                                    score -= 25;
         if (s.getScrollVelocityPxSec() > 800 && s.getScrollDirectionChanges() > 10) score -= 15;
@@ -139,6 +199,10 @@ public class MlService {
         if (score >= 40) return "drifting";
         if (score >= 20) return "distracted";
         return "collapsed";
+    }
+
+    public static double residueForDistraction(double durationMinutes) {
+        return 23.0;
     }
 
     public record PredictionResult(int score, String state, boolean focusActive) {}
