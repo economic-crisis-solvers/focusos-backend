@@ -15,7 +15,6 @@ import java.util.UUID;
 @Repository
 public interface DistractionEventRepository extends JpaRepository<DistractionEvent, UUID> {
 
-    // Fixed: added @Transactional — required for @Modifying queries
     @Modifying
     @Transactional
     @Query("UPDATE DistractionEvent d SET d.endedAt = :now WHERE d.userId = :userId AND d.endedAt IS NULL")
@@ -44,6 +43,28 @@ public interface DistractionEventRepository extends JpaRepository<DistractionEve
           AND started_at > NOW() - INTERVAL '24 hours'
         """, nativeQuery = true)
     Object[] getResidueStats(@Param("userId") UUID userId);
+
+    // Count distractions that were caught AND resolved today (ended_at is set)
+    // These represent successful interventions — used for "protected today" metric
+    @Query(value = """
+        SELECT COUNT(*)
+        FROM distraction_events
+        WHERE user_id = :userId
+          AND started_at > NOW() - INTERVAL '24 hours'
+          AND ended_at IS NOT NULL
+        """, nativeQuery = true)
+    long countClosedDistractionsToday(@Param("userId") UUID userId);
+
+    // Count distractions still open (user hasn't refocused yet)
+    // Used for "residue remaining" metric
+    @Query(value = """
+        SELECT COUNT(*)
+        FROM distraction_events
+        WHERE user_id = :userId
+          AND started_at > NOW() - INTERVAL '24 hours'
+          AND ended_at IS NULL
+        """, nativeQuery = true)
+    long countOpenDistractionsToday(@Param("userId") UUID userId);
 
     List<DistractionEvent> findByUserIdAndEndedAtIsNull(UUID userId);
 }
