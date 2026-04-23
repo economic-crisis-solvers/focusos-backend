@@ -17,34 +17,38 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * PhoneActivityController
- * -----------------------
- * Receives foreground app data from Dev B's Android UsageStatsManager.
- * If a distracting app is detected during work hours, broadcasts a
- * focus_active_change event so the phone can show a nudge notification.
- *
- * POST /api/phone-activity
- * Auth: Bearer token (same JWT as all other endpoints)
- *
- * Payload:
- * {
- *   "appPackage": "com.instagram.android",
- *   "appCategory": "social",
- *   "minutesInForeground": 4.5
- * }
- */
 @RestController
 @RequestMapping("/api")
 public class PhoneActivityController {
 
+    // ✅ Change 1 — helper method (already correct)
+    private int calculatePhoneDecayScore(double minutesInForeground, String category) {
+        double seconds = minutesInForeground * 60.0;
+
+        int floor = switch (category != null ? category.toLowerCase() : "") {
+            case "social"        -> 20;
+            case "entertainment" -> 25;
+            case "gaming"        -> 15;
+            default              -> 30;
+        };
+
+        if (seconds <= 30) {
+            return (int) (90 - (seconds / 30.0) * 5);
+        }
+
+        double decayElapsed = seconds - 30;
+        double decayDuration = 120.0;
+        double progress = Math.min(decayElapsed / decayDuration, 1.0);
+
+        return (int) Math.max(floor, 90 - (90 - floor) * progress);
+    }
+
     private static final Logger log = LoggerFactory.getLogger(PhoneActivityController.class);
 
-    // Packages considered distracting — Dev B can expand this list
     private static final java.util.Set<String> DISTRACTING_PACKAGES = java.util.Set.of(
         "com.instagram.android",
         "com.twitter.android",
-        "com.zhiliaoapp.musically",   // TikTok
+        "com.zhiliaoapp.musically",
         "com.facebook.katana",
         "com.snapchat.android",
         "com.reddit.frontpage",
@@ -52,7 +56,6 @@ public class PhoneActivityController {
         "com.google.android.youtube"
     );
 
-    // Nudge threshold — only notify if user has been on a distracting app this long
     private static final double NUDGE_THRESHOLD_MINUTES = 3.0;
 
     private final UserSettingsRepository     settingsRepo;
@@ -77,7 +80,6 @@ public class PhoneActivityController {
         log.info("[PhoneActivity] User {} — app: {}, category: {}, minutes: {}",
             userId, body.appPackage, body.appCategory, body.minutesInForeground);
 
-        // Check work hours — only act during work hours
         UserSettings settings = settingsRepo.findByUserId(userId).orElse(null);
         boolean withinWorkHours = isWithinWorkHours(settings);
 
@@ -91,13 +93,26 @@ public class PhoneActivityController {
             return ResponseEntity.ok(response);
         }
 
-        // Check if this is a distracting app and user has been on it long enough
+        // ✅ Change 2 — ALWAYS broadcast score update (every request)
+        int phoneDecayScore = calculatePhoneDecayScore(
+            body.minutesInForeground,
+            body.appCategory
+        );
+
+        Map<String, Object> scorePayload = new HashMap<>();
+        scorePayload.put("score", phoneDecayScore);
+        scorePayload.put("state", "distracted");
+        scorePayload.put("timestamp", Instant.now().toString());
+        scorePayload.put("source", "phone");
+
+        // IMPORTANT: using SAME format as your existing system
+        realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
+
         boolean isDistracting = DISTRACTING_PACKAGES.contains(body.appPackage)
             || "social".equals(body.appCategory)
             || "entertainment".equals(body.appCategory);
 
         if (isDistracting && body.minutesInForeground >= NUDGE_THRESHOLD_MINUTES) {
-            // Broadcast phone_distraction event so mobile can show nudge notification
             Map<String, Object> payload = new HashMap<>();
             payload.put("focus_active",          false);
             payload.put("source",                "phone");
@@ -116,7 +131,6 @@ public class PhoneActivityController {
         return ResponseEntity.ok(response);
     }
 
-    // ── Work Hours Helper ─────────────────────────────────────────────────
     private boolean isWithinWorkHours(UserSettings settings) {
         if (settings == null) return true;
         String startStr = settings.getWorkHoursStart();
@@ -139,10 +153,9 @@ public class PhoneActivityController {
         }
     }
 
-    // ── Request DTO ───────────────────────────────────────────────────────
     public static class PhoneActivityRequest {
-        public String appPackage;           // e.g. "com.instagram.android"
-        public String appCategory;          // e.g. "social", "entertainment"
-        public double minutesInForeground;  // e.g. 4.5
+        public String appPackage;
+        public String appCategory;
+        public double minutesInForeground;
     }
 }
