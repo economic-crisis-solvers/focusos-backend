@@ -21,7 +21,7 @@ import java.util.UUID;
 @RequestMapping("/api")
 public class PhoneActivityController {
 
-    // ✅ Change 1 — helper method (already correct)
+    // helper method
     private int calculatePhoneDecayScore(double minutesInForeground, String category) {
         double seconds = minutesInForeground * 60.0;
 
@@ -93,7 +93,7 @@ public class PhoneActivityController {
             return ResponseEntity.ok(response);
         }
 
-        // ✅ Change 2 — ALWAYS broadcast score update (every request)
+        // broadcast score update	
         int phoneDecayScore = calculatePhoneDecayScore(
             body.minutesInForeground,
             body.appCategory
@@ -105,7 +105,7 @@ public class PhoneActivityController {
         scorePayload.put("timestamp", Instant.now().toString());
         scorePayload.put("source", "phone");
 
-        // IMPORTANT: using SAME format as your existing system
+        
         realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
 
         boolean isDistracting = DISTRACTING_PACKAGES.contains(body.appPackage)
