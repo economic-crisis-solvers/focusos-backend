@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,11 +34,27 @@ public class EventController {
 
     private static final Logger log = LoggerFactory.getLogger(EventController.class);
 
-    // ── Notification timing fix ───────────────────────────────────────────
-    // Only release notifications after 3 consecutive focused batches (90 seconds)
-    // to prevent releasing during brief score spikes.
+    // ── Consecutive focus tracking ────────────────────────────────────────
+    // Requires 3 consecutive above-threshold batches before releasing Focus Shield
     private final ConcurrentHashMap<String, Integer> consecutiveFocusCount = new ConcurrentHashMap<>();
     private static final int CONSECUTIVE_FOCUS_REQUIRED = 3;
+
+    // ── Persistent nudge tracking ─────────────────────────────────────────
+    // Tracks how many 30s batches each user has spent below threshold
+    // Every 2 batches (60 seconds) = one nudge sent, up to MAX_NUDGES
+    // Map: userId → consecutive below-threshold batch count
+    private final ConcurrentHashMap<String, Integer> belowThresholdBatches = new ConcurrentHashMap<>();
+    private static final int MAX_NUDGES         = 5;
+    private static final int BATCHES_PER_NUDGE  = 2; // 2 batches × 30s = 60s between nudges
+
+    // Escalating nudge messages — index 0 fires after 60s, index 4 after 300s
+    private static final List<String> NUDGE_MESSAGES = List.of(
+        "Still distracted? It's been 1 minute — try closing distracting tabs.",
+        "2 minutes below focus threshold. A quick reset might help.",
+        "3 minutes distracted. Take a breath and get back to your work.",
+        "4 minutes gone. Every minute counts — refocus now.",
+        "5 minutes distracted. Last reminder — FocusOS won't keep nudging."
+    );
 
     private final FocusEventRepository       focusEventRepo;
     private final DistractionEventRepository distractionRepo;
@@ -77,25 +94,26 @@ public class EventController {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Rate limit: 120 events/hour");
         }
 
-        // ── 2. Fetch user settings (needed for threshold + work hours) ────
-        UserSettings settings = settingsRepo.findByUserId(userId).orElse(null);
-        int threshold = settings != null ? settings.getFocusThreshold() : 45;
+        // ── 2. Fetch user settings ────────────────────────────────────────
+        UserSettings settings  = settingsRepo.findByUserId(userId).orElse(null);
+        int          threshold = settings != null ? settings.getFocusThreshold() : 45;
+        log.info("[Events] Using threshold: {} for user {}", threshold, userId);
 
         // ── 3. Work hours check ───────────────────────────────────────────
-        // If work hours are set and current time is outside them,
-        // we still save the event and broadcast score, but skip DND/nudge triggers.
         boolean withinWorkHours = isWithinWorkHours(settings);
         if (!withinWorkHours) {
             log.info("[Events] Outside work hours for user {} — passive mode only", userId);
             consecutiveFocusCount.put(userId.toString(), 0);
+            belowThresholdBatches.remove(userId.toString());
         }
 
-        // ── 4. Content analysis (async — enriches URL category) ───────────
+        // ── 4. Content analysis ───────────────────────────────────────────
         String enrichedCategory = null;
         String rawUrl = body.getActiveUrl();
         if (rawUrl != null && !rawUrl.isEmpty()) {
             try {
-                enrichedCategory = contentAnalysisService.analyzeUrl(rawUrl, body.getPageTitle(), body.getPageDescription());
+                enrichedCategory = contentAnalysisService.analyzeUrl(
+                    rawUrl, body.getPageTitle(), body.getPageDescription());
             } catch (Exception e) {
                 log.warn("[Events] Content analysis failed: {}", e.getMessage());
             }
@@ -108,10 +126,10 @@ public class EventController {
         }
 
         // ── 5. ML inference ───────────────────────────────────────────────
-       MlService.PredictionResult prediction = mlService.predict(signals);
-int score = prediction.score();
-String state = prediction.state();
-boolean focusActive = prediction.focusActive();
+        MlService.PredictionResult prediction = mlService.predict(signals);
+        int     score     = prediction.score();
+        String  state     = prediction.state();
+        boolean focusActive = score >= threshold;
 
         // ── 6. Previous score ─────────────────────────────────────────────
         Integer prevScore = focusEventRepo
@@ -131,34 +149,65 @@ boolean focusActive = prediction.focusActive();
         }
         focusEventRepo.save(event);
 
-        // ── 8. Threshold crossing + notification timing fix ───────────────
-        boolean crossedBelow = prevScore != null && prevScore >= threshold && score < threshold;
-
+        // ── 8. Threshold crossing + recovery tracking ─────────────────────
+        boolean crossedBelow  = prevScore != null && prevScore >= threshold && score < threshold;
         String  userKey       = userId.toString();
         boolean stableRecovery = false;
 
         if (score >= threshold) {
+            // Above threshold — increment consecutive focus count
             int count = consecutiveFocusCount.merge(userKey, 1, Integer::sum);
+            // Clear nudge state — user is recovering
+            belowThresholdBatches.remove(userKey);
+
             if (prevScore != null && prevScore < threshold && count >= CONSECUTIVE_FOCUS_REQUIRED) {
                 stableRecovery = true;
                 consecutiveFocusCount.put(userKey, 0);
-                log.info("[Events] Stable focus recovery for user {} after {} consecutive batches",
+                log.info("[Events] Stable focus recovery for user {} after {} batches",
                     userId, CONSECUTIVE_FOCUS_REQUIRED);
             }
         } else {
+            // Below threshold — reset focus count, increment below-threshold count
             consecutiveFocusCount.put(userKey, 0);
+            if (withinWorkHours) {
+                belowThresholdBatches.merge(userKey, 1, Integer::sum);
+            }
         }
 
-        // Only open/close distraction events and trigger DND during work hours
-        if (withinWorkHours) {
-            String currentCategory = signals.getUrlCategory() == null ? "other" : signals.getUrlCategory().toLowerCase();
-boolean isProductiveUrl = currentCategory.equals("work") || currentCategory.equals("educational");
+        // ── 9. Persistent nudge logic ─────────────────────────────────────
+        // Every BATCHES_PER_NUDGE batches below threshold = one nudge (60 seconds)
+        // Caps at MAX_NUDGES (5 nudges = 5 minutes)
+        // nudgeMessage is returned in the API response — extension fires the notification
+        String nudgeMessage = null;
 
-if (crossedBelow && !isProductiveUrl) {
-    DistractionEvent distraction = new DistractionEvent();
-    distraction.setUserId(userId);
-    distraction.setStartedAt(Instant.now());
-    distraction.setTriggerCategory(signals.getUrlCategory());
+        if (withinWorkHours && score < threshold && !crossedBelow) {
+            int batchesBelow = belowThresholdBatches.getOrDefault(userKey, 0);
+
+            // Check if this batch is exactly on a nudge interval
+            // e.g. batch 2, 4, 6, 8, 10 → nudges 1-5
+            if (batchesBelow > 0 && batchesBelow % BATCHES_PER_NUDGE == 0) {
+                int nudgeIndex = (batchesBelow / BATCHES_PER_NUDGE) - 1;
+
+                if (nudgeIndex < MAX_NUDGES) {
+                    nudgeMessage = NUDGE_MESSAGES.get(nudgeIndex);
+                    log.info("[Events] Persistent nudge #{} for user {}: {}",
+                        nudgeIndex + 1, userId, nudgeMessage);
+                }
+            }
+        }
+
+        // ── 10. Distraction tracking (work/educational URLs excluded) ─────
+        String  currentCategory = signals.getUrlCategory() == null
+            ? "other" : signals.getUrlCategory().toLowerCase();
+        boolean isProductiveUrl = currentCategory.equals("work")
+            || currentCategory.equals("educational");
+
+        if (withinWorkHours) {
+            if (crossedBelow && !isProductiveUrl) {
+                DistractionEvent distraction = new DistractionEvent();
+                distraction.setUserId(userId);
+                distraction.setStartedAt(Instant.now());
+                distraction.setTriggerCategory(signals.getUrlCategory());
                 distraction.setResidueMinutesAdded(ResidueService.residueForDistraction(0));
                 distractionRepo.save(distraction);
                 log.info("[Events] Focus dropped below threshold for user {}", userId);
@@ -166,21 +215,21 @@ if (crossedBelow && !isProductiveUrl) {
 
             if (stableRecovery) {
                 distractionRepo.closeOpenEvents(userId, Instant.now());
-                log.info("[Events] Stable recovery confirmed — closing distraction events for user {}", userId);
+                log.info("[Events] Closing distraction events for user {}", userId);
             }
         }
 
-        // ── 9. Realtime broadcasts ────────────────────────────────────────
+        // ── 11. Realtime broadcasts ───────────────────────────────────────
         String nowIso = Instant.now().toString();
 
-        // Always broadcast score update regardless of work hours
+        // Always broadcast score update
         Map<String, Object> scorePayload = new HashMap<>();
         scorePayload.put("score",     score);
         scorePayload.put("state",     state);
         scorePayload.put("timestamp", nowIso);
         realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
 
-        // Only broadcast focus_active_change (triggers DND + nudge) during work hours
+        // Only broadcast focus_active_change during work hours on threshold cross
         if (withinWorkHours && (crossedBelow || stableRecovery)) {
             Map<String, Object> activePayload = new HashMap<>();
             activePayload.put("focus_active", focusActive);
@@ -192,40 +241,31 @@ if (crossedBelow && !isProductiveUrl) {
             realtimeService.broadcast(userId.toString(), "focus_active_change", activePayload);
         }
 
-        // ── 10. Residue ───────────────────────────────────────────────────
+        // ── 12. Residue ───────────────────────────────────────────────────
         double residueMinutes = residueService.calculate(userId).getResidueMinutesRemaining();
 
-        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes);
+        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes, nudgeMessage);
     }
 
-    // ── Work Hours Helper ─────────────────────────────────────────────────
-    // Returns true if current time (IST) is within user's configured work hours.
-    // If work hours not set, defaults to always active (backwards compatible).
+    // ── Work hours helper ─────────────────────────────────────────────────
     private boolean isWithinWorkHours(UserSettings settings) {
         if (settings == null) return true;
-
         String startStr = settings.getWorkHoursStart();
         String endStr   = settings.getWorkHoursEnd();
-
-        // If not configured, treat as always within work hours
-        if (startStr == null || startStr.isEmpty() || endStr == null || endStr.isEmpty()) {
-            return true;
-        }
+        if (startStr == null || startStr.isEmpty() || endStr == null || endStr.isEmpty()) return true;
 
         try {
-            LocalTime now   = LocalTime.now(ZoneId.of("Asia/Kolkata")); // IST — change if needed
-            LocalTime start = LocalTime.parse(startStr); // e.g. "09:00"
-            LocalTime end   = LocalTime.parse(endStr);   // e.g. "18:00"
+            LocalTime now   = LocalTime.now(ZoneId.of("Asia/Kolkata"));
+            LocalTime start = LocalTime.parse(startStr);
+            LocalTime end   = LocalTime.parse(endStr);
 
             if (start.isBefore(end)) {
-                // Normal range e.g. 09:00 - 18:00
                 return !now.isBefore(start) && !now.isAfter(end);
             } else {
-                // Overnight range e.g. 22:00 - 06:00
                 return !now.isBefore(start) || !now.isAfter(end);
             }
         } catch (Exception e) {
-            log.warn("[Events] Could not parse work hours — defaulting to active: {}", e.getMessage());
+            log.warn("[Events] Could not parse work hours — defaulting active: {}", e.getMessage());
             return true;
         }
     }
