@@ -7,6 +7,7 @@ import com.focusos.model.entity.UserSettings;
 import com.focusos.repository.DistractionEventRepository;
 import com.focusos.repository.FocusEventRepository;
 import com.focusos.repository.UserSettingsRepository;
+import com.focusos.service.CompositeScoreService;
 import com.focusos.service.ContentAnalysisService;
 import com.focusos.service.MlService;
 import com.focusos.service.RealtimeService;
@@ -63,6 +64,7 @@ public class EventController {
     private final RealtimeService            realtimeService;
     private final ResidueService             residueService;
     private final ContentAnalysisService     contentAnalysisService;
+    private final CompositeScoreService      compositeScoreService;
 
     public EventController(FocusEventRepository focusEventRepo,
                            DistractionEventRepository distractionRepo,
@@ -70,7 +72,8 @@ public class EventController {
                            MlService mlService,
                            RealtimeService realtimeService,
                            ResidueService residueService,
-                           ContentAnalysisService contentAnalysisService) {
+                           ContentAnalysisService contentAnalysisService,
+                           CompositeScoreService compositeScoreService) {
         this.focusEventRepo         = focusEventRepo;
         this.distractionRepo        = distractionRepo;
         this.settingsRepo           = settingsRepo;
@@ -78,6 +81,7 @@ public class EventController {
         this.realtimeService        = realtimeService;
         this.residueService         = residueService;
         this.contentAnalysisService = contentAnalysisService;
+        this.compositeScoreService  = compositeScoreService;
     }
 
     @PostMapping("/events")
@@ -222,12 +226,8 @@ public class EventController {
         // ── 11. Realtime broadcasts ───────────────────────────────────────
         String nowIso = Instant.now().toString();
 
-        // Always broadcast score update
-        Map<String, Object> scorePayload = new HashMap<>();
-        scorePayload.put("score",     score);
-        scorePayload.put("state",     state);
-        scorePayload.put("timestamp", nowIso);
-        realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
+        // Always broadcast composite score update (min of browser and phone)
+        compositeScoreService.updateBrowserScore(userId.toString(), score, state);
 
         // Only broadcast focus_active_change during work hours on threshold cross
         if (withinWorkHours && (crossedBelow || stableRecovery)) {

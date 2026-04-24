@@ -3,6 +3,7 @@ package com.focusos.controller;
 import com.focusos.model.entity.UserSettings;
 import com.focusos.repository.DistractionEventRepository;
 import com.focusos.repository.UserSettingsRepository;
+import com.focusos.service.CompositeScoreService;
 import com.focusos.service.RealtimeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,13 +62,16 @@ public class PhoneActivityController {
     private final UserSettingsRepository     settingsRepo;
     private final RealtimeService            realtimeService;
     private final DistractionEventRepository distractionRepo;
+    private final CompositeScoreService      compositeScoreService;
 
     public PhoneActivityController(UserSettingsRepository settingsRepo,
                                    RealtimeService realtimeService,
-                                   DistractionEventRepository distractionRepo) {
-        this.settingsRepo    = settingsRepo;
-        this.realtimeService = realtimeService;
-        this.distractionRepo = distractionRepo;
+                                   DistractionEventRepository distractionRepo,
+                                   CompositeScoreService compositeScoreService) {
+        this.settingsRepo          = settingsRepo;
+        this.realtimeService       = realtimeService;
+        this.distractionRepo       = distractionRepo;
+        this.compositeScoreService = compositeScoreService;
     }
 
     @PostMapping("/phone-activity")
@@ -93,21 +97,32 @@ public class PhoneActivityController {
             return ResponseEntity.ok(response);
         }
 
-        // broadcast score update	
-        int phoneDecayScore = calculatePhoneDecayScore(
-            body.minutesInForeground,
-            body.appCategory
-        );
+        // ── Handle "clear" signal (user closed the distracting app) ───────
+        if ("clear".equals(body.appPackage)) {
+            log.info("[PhoneActivity] User {} closed distracting app — clearing phone score", userId);
+            int composite = compositeScoreService.clearPhoneScore(userId.toString());
+            response.put("composite_score", composite);
+            return ResponseEntity.ok(response);
+        }
 
-        Map<String, Object> scorePayload = new HashMap<>();
-        scorePayload.put("score", phoneDecayScore);
-        scorePayload.put("state", "distracted");
-        scorePayload.put("timestamp", Instant.now().toString());
-        scorePayload.put("source", "phone");
+        // ── Calculate phone decay score ───────────────────────────────────
+        int phoneDecayScore;
+        if (body.phoneScore > 0) {
+            // Use the live decaying score sent from the phone app
+            phoneDecayScore = body.phoneScore;
+        } else {
+            // Fallback: calculate server-side decay
+            phoneDecayScore = calculatePhoneDecayScore(
+                body.minutesInForeground,
+                body.appCategory
+            );
+        }
 
-        
-        realtimeService.broadcast(userId.toString(), "focus_score_update", scorePayload);
+        // ── Update composite score (min of browser and phone) ────────────
+        int composite = compositeScoreService.updatePhoneScore(userId.toString(), phoneDecayScore);
+        response.put("composite_score", composite);
 
+        // ── Distraction nudge logic (for DND etc.) ───────────────────────
         boolean isDistracting = DISTRACTING_PACKAGES.contains(body.appPackage)
             || "social".equals(body.appCategory)
             || "entertainment".equals(body.appCategory);
@@ -157,5 +172,6 @@ public class PhoneActivityController {
         public String appPackage;
         public String appCategory;
         public double minutesInForeground;
+        public int    phoneScore;  // live decaying score from the phone app (0 = not sent)
     }
 }
