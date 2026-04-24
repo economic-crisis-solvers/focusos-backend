@@ -244,7 +244,12 @@ public class EventController {
         // ── 12. Residue ───────────────────────────────────────────────────
         double residueMinutes = residueService.calculate(userId).getResidueMinutesRemaining();
 
-        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes, nudgeMessage);
+        int compositeScore = compositeScoreService.getComposite(userId.toString());
+        int browserScore   = compositeScoreService.getBrowserScore(userId.toString());
+        int phoneScore     = compositeScoreService.getPhoneScore(userId.toString());
+
+        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes, nudgeMessage,
+                compositeScore, browserScore, phoneScore);
     }
 
     // ── Work hours helper ─────────────────────────────────────────────────

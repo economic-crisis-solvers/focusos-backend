@@ -66,14 +66,21 @@ public class EventDtos {
         private boolean focusActive;
         private double  residueMinutes;
         private String  nudgeMessage;  // non-null only when a persistent nudge should fire
+        private int     compositeScore; // min(browser, phone) — the real dashboard score
+        private int     browserScore;
+        private int     phoneScore;
 
         public EventResponse(int score, String state, boolean focusActive,
-                             double residueMinutes, String nudgeMessage) {
-            this.score         = score;
-            this.state         = state;
-            this.focusActive   = focusActive;
+                             double residueMinutes, String nudgeMessage,
+                             int compositeScore, int browserScore, int phoneScore) {
+            this.score          = score;
+            this.state          = state;
+            this.focusActive    = focusActive;
             this.residueMinutes = residueMinutes;
-            this.nudgeMessage  = nudgeMessage;
+            this.nudgeMessage   = nudgeMessage;
+            this.compositeScore = compositeScore;
+            this.browserScore   = browserScore;
+            this.phoneScore     = phoneScore;
         }
 
         public int     getScore()          { return score; }
@@ -81,5 +88,8 @@ public class EventDtos {
         public boolean isFocusActive()     { return focusActive; }
         public double  getResidueMinutes() { return residueMinutes; }
         public String  getNudgeMessage()   { return nudgeMessage; }
+        public int     getCompositeScore() { return compositeScore; }
+        public int     getBrowserScore()   { return browserScore; }
+        public int     getPhoneScore()     { return phoneScore; }
     }
 }
