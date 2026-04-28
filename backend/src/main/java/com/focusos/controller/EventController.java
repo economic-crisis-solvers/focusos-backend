@@ -230,7 +230,7 @@ public class EventController {
         // ── 12. Residue ───────────────────────────────────────────────────
         double residueMinutes = residueService.calculate(userId).getResidueMinutesRemaining();
 
-        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes, nudgeMessage);
+        return new EventDtos.EventResponse(score, state, focusActive, residueMinutes, nudgeMessage, compositeScore, browserScore, phoneScore);
     }
 
     // ── Work hours check ──────────────────────────────────────────────────
