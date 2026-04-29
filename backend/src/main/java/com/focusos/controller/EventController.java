@@ -128,7 +128,7 @@ public class EventController {
         int    score = prediction.score();
         String state = prediction.state();
         // Use user's actual threshold — NOT the ML default of 45
-        boolean focusActive = score >= threshold;
+        boolean focusActive = !withinWorkHours || (score >= threshold);
 
         // ── 6. Previous score ─────────────────────────────────────────────
         Integer prevScore = focusEventRepo
